@@ -26,6 +26,13 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
+# ffmpeg-static reads FFMPEG_BIN at runtime and returns this path directly,
+# so we skip shipping the prebuilt binary and use the apt-installed one.
+ENV FFMPEG_BIN=/usr/bin/ffmpeg
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk \
+ && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system --gid 1001 nodejs \
  && useradd --system --uid 1001 --gid nodejs nextjs

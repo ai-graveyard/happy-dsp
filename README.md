@@ -37,12 +37,16 @@
 
 ## 本地开发
 
+需要 Node ≥ 22 和 pnpm（仓库已锁定 `pnpm@11.3.0`，启用 corepack 即可自动用对版本）：
+
 ```bash
-git clone <repo>
-cd web
-npm install
-cp .env.example .env.local        # 可选：填共享 key
-npm run dev
+corepack enable                   # 一次性，让 Node 自带的 pnpm 走 packageManager 字段
+
+git clone git@github.com:ai-graveyard/happy-dsp.git
+cd happy-dsp
+pnpm install
+cp .env.example .env              # 可选：填共享 key
+pnpm dev
 ```
 
 打开 http://localhost:3000 ，点右上角 ⚙ 设置 → 填入你的 sk-xxx → 开始生成。
@@ -61,14 +65,35 @@ npm run dev
 
 ### Docker / VPS（推荐自部署）
 
-无 serverless timeout 限制，最稳：
+无 serverless timeout 限制，最稳。仓库自带 [Dockerfile](Dockerfile)（Node 22 + pnpm + Next.js standalone，多阶段构建，镜像约 333 MB，运行时用 apt 装的 ffmpeg）：
 
 ```bash
-npm run build
-npm start
+docker build -t happy-dsp .
+docker run -d --name happy-dsp -p 3000:3000 --env-file .env happy-dsp
 ```
 
-或自己写一个 Dockerfile（基于 `node:20-alpine`）。
+`.env` 至少需要：
+
+```env
+SHARED_MR_KEY=sk-xxxxxxxx                                  # 可选，共享 key
+MR_BASE_URL=https://model-router.edu-aliyun.com/v1         # 可选，覆盖默认 base url
+```
+
+或直接 `-e` 传：
+
+```bash
+docker run --rm -p 3000:3000 \
+  -e SHARED_MR_KEY=sk-xxx \
+  -e MR_BASE_URL=https://model-router.edu-aliyun.com/v1 \
+  happy-dsp
+```
+
+不用 Docker 的话，直接：
+
+```bash
+pnpm build
+pnpm start
+```
 
 ## API Key 怎么搞
 
