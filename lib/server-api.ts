@@ -251,13 +251,14 @@ async function ttsAliyunEdu(
   voice: string,
   signal?: AbortSignal,
 ): Promise<string> {
+  // 服务端报 "The input parameter requires json" —— input 必须是 JSON 对象
+  // 而不是裸字符串，且 voice 也需要随 input 走。
   const r = await requestWithRetry(`${client.provider.baseUrl}/audio/speech`, withSignal({
     method: "POST",
     headers: authHeaders(client.apiKey),
     body: JSON.stringify({
       model,
-      input: text,
-      voice,
+      input: { text, voice },
     }),
   }, signal));
   const j = await r.json();
