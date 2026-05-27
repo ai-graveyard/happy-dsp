@@ -43,6 +43,7 @@ import {
 } from "@/lib/storage";
 import { cn } from "@/lib/utils";
 import {
+  getProviderMeta,
   type GenerateEvent,
   type HistoryItem,
   type SceneAsset,
@@ -196,7 +197,6 @@ export default function HomePage() {
         "Content-Type": "application/json",
       };
       if (settings.apiKey) headers["x-mr-key"] = settings.apiKey;
-      if (settings.apiBaseUrl) headers["x-mr-base-url"] = settings.apiBaseUrl;
 
       const res = await fetch("/api/generate", {
         method: "POST",
@@ -431,11 +431,11 @@ export default function HomePage() {
                     <span>≈ {totalSeconds}s</span>
                     <span className="text-border">·</span>
                     <span>
-                      {settings.apiKey
-                        ? settings.apiBaseUrl
-                          ? "自带 key + URL"
-                          : "自带 key"
-                        : "共享 key"}
+                      {getProviderMeta(settings.provider).short}
+                    </span>
+                    <span className="text-border">·</span>
+                    <span>
+                      {settings.apiKey ? "自带 key" : "共享 key"}
                     </span>
                   </div>
                 </div>

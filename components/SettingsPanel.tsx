@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronRight, ExternalLink, KeyRound, Link2 } from "lucide-react";
+import { ChevronRight, ExternalLink, KeyRound, Server } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
@@ -15,14 +15,12 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import {
-  DEFAULT_API_BASE_URL,
-  DEFAULT_IMAGE_MODEL,
-  DEFAULT_STORYBOARD_MODEL,
-  DEFAULT_TTS_MODEL,
-  DEFAULT_VIDEO_MODEL,
   IMAGE_SIZES,
+  PROVIDERS,
   TTS_VOICES,
-  VIDEO_MODELS,
+  getProviderMeta,
+  isProviderId,
+  type ProviderMeta,
   type UserSettings,
 } from "@/lib/types";
 
@@ -32,12 +30,12 @@ interface Props {
   disabled?: boolean;
 }
 
-// 单个模型字段：label + 用途说明 + 默认值占位
+// 模型字段元信息 —— 实际默认值随 provider 走
 interface ModelField {
   key: "storyboardModel" | "imageModel" | "videoModel" | "ttsModel";
   label: string;
   purpose: string;
-  defaultValue: string;
+  defaultKey: keyof ProviderMeta["defaults"];
 }
 
 const MODEL_FIELDS: ModelField[] = [
@@ -45,39 +43,40 @@ const MODEL_FIELDS: ModelField[] = [
     key: "storyboardModel",
     label: "分镜（文本生成）",
     purpose: "拆分镜、写旁白",
-    defaultValue: DEFAULT_STORYBOARD_MODEL,
+    defaultKey: "storyboardModel",
   },
   {
     key: "imageModel",
     label: "文生图",
     purpose: "生成每个分镜的关键帧",
-    defaultValue: DEFAULT_IMAGE_MODEL,
+    defaultKey: "imageModel",
   },
   {
     key: "videoModel",
     label: "图生视频",
     purpose: "把关键帧动起来",
-    defaultValue: DEFAULT_VIDEO_MODEL,
+    defaultKey: "videoModel",
   },
   {
     key: "ttsModel",
     label: "TTS 语音合成",
     purpose: "把旁白读出来",
-    defaultValue: DEFAULT_TTS_MODEL,
+    defaultKey: "ttsModel",
   },
 ];
 
 export function SettingsPanel({ settings, onChange, disabled }: Props) {
   const [modelsOpen, setModelsOpen] = useState(false);
+  const provider = getProviderMeta(settings.provider);
 
   function update<K extends keyof UserSettings>(k: K, v: UserSettings[K]) {
     onChange({ ...settings, [k]: v });
   }
 
-  // 有任何模型字段被用户改过（与默认值不同）时显示"已改"角标
+  // 有任何模型字段被填了非空值时显示"已改"角标（与 provider 默认对比）
   const overriddenCount = MODEL_FIELDS.reduce((n, f) => {
     const v = (settings[f.key] || "").trim();
-    return v && v !== f.defaultValue ? n + 1 : n;
+    return v && v !== provider.defaults[f.defaultKey] ? n + 1 : n;
   }, 0);
 
   return (
@@ -111,21 +110,37 @@ export function SettingsPanel({ settings, onChange, disabled }: Props) {
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="apiBaseUrl">API URL</Label>
+          <Label htmlFor="provider">API 端点</Label>
           <div className="relative">
-            <Link2 className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
-            <Input
-              id="apiBaseUrl"
-              type="url"
-              value={settings.apiBaseUrl}
-              onChange={(e) => update("apiBaseUrl", e.target.value)}
-              placeholder={`留空使用默认 ${DEFAULT_API_BASE_URL}`}
+            <Server className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground z-10 pointer-events-none" />
+            <Select
+              value={
+                isProviderId(settings.provider) ? settings.provider : provider.id
+              }
+              onValueChange={(v) => {
+                if (isProviderId(v)) update("provider", v);
+              }}
               disabled={disabled}
-              className="pl-8 font-mono text-xs"
-            />
+            >
+              <SelectTrigger id="provider" className="pl-8">
+                <SelectValue>{provider.short}</SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                {PROVIDERS.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    <div className="flex flex-col gap-0.5">
+                      <span>{p.label}</span>
+                      <span className="text-[10px] text-muted-foreground font-mono">
+                        {p.baseUrl}
+                      </span>
+                    </div>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
-          <p className="text-xs text-muted-foreground leading-relaxed">
-            需配合自带 API Key 使用，兼容 OpenAI 协议的端点。
+          <p className="text-xs text-muted-foreground leading-relaxed font-mono">
+            {provider.baseUrl}
           </p>
         </div>
       </section>
@@ -245,13 +260,16 @@ export function SettingsPanel({ settings, onChange, disabled }: Props) {
         {modelsOpen && (
           <div id="model-config" className="space-y-4 pt-1">
             <p className="text-xs text-muted-foreground leading-relaxed">
-              留空即用默认值。需要满足所选 API URL 端点支持。
+              留空 = 用 {provider.short} 的默认模型。命名规则随 provider 不同，
+              切换 provider 后留空字段会按对应默认值生效。
             </p>
 
             {MODEL_FIELDS.map((f) => {
-              // 图生视频保留 Select（有 curated label）+ 自定义文本输入
+              const defaultValue = provider.defaults[f.defaultKey];
+
+              // 图生视频：保留 curated Select + 自定义文本输入
               if (f.key === "videoModel") {
-                const isPreset = VIDEO_MODELS.some(
+                const isPreset = provider.videoModels.some(
                   (m) => m.id === settings.videoModel,
                 );
                 return (
@@ -266,7 +284,6 @@ export function SettingsPanel({ settings, onChange, disabled }: Props) {
                       value={isPreset ? settings.videoModel : "__custom__"}
                       onValueChange={(v) => {
                         if (v === "__custom__") {
-                          // 切到自定义但保留当前值（若已是 preset，清空让用户输入）
                           update(
                             "videoModel",
                             isPreset ? "" : settings.videoModel,
@@ -280,14 +297,14 @@ export function SettingsPanel({ settings, onChange, disabled }: Props) {
                       <SelectTrigger>
                         <SelectValue>
                           {isPreset
-                            ? VIDEO_MODELS.find(
+                            ? provider.videoModels.find(
                                 (m) => m.id === settings.videoModel,
                               )?.label
                             : "自定义…"}
                         </SelectValue>
                       </SelectTrigger>
                       <SelectContent>
-                        {VIDEO_MODELS.map((m) => (
+                        {provider.videoModels.map((m) => (
                           <SelectItem key={m.id} value={m.id}>
                             {m.label}
                           </SelectItem>
@@ -302,7 +319,7 @@ export function SettingsPanel({ settings, onChange, disabled }: Props) {
                         onChange={(e) =>
                           update("videoModel", e.target.value)
                         }
-                        placeholder={f.defaultValue}
+                        placeholder={defaultValue}
                         disabled={disabled}
                         className="font-mono text-xs"
                       />
@@ -323,7 +340,7 @@ export function SettingsPanel({ settings, onChange, disabled }: Props) {
                     id={f.key}
                     value={settings[f.key]}
                     onChange={(e) => update(f.key, e.target.value)}
-                    placeholder={f.defaultValue}
+                    placeholder={defaultValue}
                     disabled={disabled}
                     className="font-mono text-xs"
                   />

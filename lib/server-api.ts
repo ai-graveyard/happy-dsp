@@ -1,21 +1,21 @@
-// Model Router API 客户端 (server-side only)。
-// 端到端处理：chat / 异步图像 / 异步视频 / TTS。
-// key 由调用方传入（用户自带 key > 环境变量 SHARED_MR_KEY）。
+// Provider-aware API 客户端 (server-side only)。
+// 每个 provider 有自己的 baseUrl + 路径/payload 协议；这里按 provider.id 分发：
+//   - aliyun-edu  → model-router 风格：/chat/completions, /images/generations 等
+//   - dashscope   → DashScope 原生：/services/aigc/text-generation/generation 等
+// /tasks/{id} 两边形状基本一致，共用 pollTask。
 
 import "server-only";
 
-import { DEFAULT_API_BASE_URL } from "./types";
+import type { ProviderMeta } from "./types";
 
 export interface ApiClient {
   apiKey: string;
-  baseUrl: string; // 已 resolve、已 strip 尾斜杠
+  provider: ProviderMeta;
 }
 
-// 优先级：调用方覆盖 > env > 默认
-export function resolveBaseUrl(override?: string): string {
-  const raw = (override?.trim() || process.env.MR_BASE_URL || DEFAULT_API_BASE_URL).trim();
-  return raw.replace(/\/+$/, "");
-}
+// ============================================================================
+// 共享工具
+// ============================================================================
 
 function authHeaders(apiKey: string, extra?: Record<string, string>) {
   return {
@@ -25,8 +25,6 @@ function authHeaders(apiKey: string, extra?: Record<string, string>) {
   };
 }
 
-// 带 429 / 5xx 指数退避的请求。
-// 4xx (非 429) 直接抛错不重试；网络错误也按 5xx 处理。
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
 async function requestWithRetry(
@@ -46,14 +44,11 @@ async function requestWithRetry(
       }
       if (!r.ok) {
         const body = await r.text().catch(() => "");
-        // 非可重试错误：立即抛出
         throw new Error(`HTTP ${r.status}: ${body.slice(0, 200)}`);
       }
       return r;
     } catch (e) {
-      // AbortError 立即上抛，不重试
       if ((e as Error)?.name === "AbortError") throw e;
-      // 已经是 HTTP 非重试错误也直接抛
       if (e instanceof Error && /^HTTP \d{3}: /.test(e.message)) throw e;
       lastErr = e;
       const wait = 2_000 * Math.pow(2, attempt);
@@ -63,12 +58,10 @@ async function requestWithRetry(
   throw new Error(`请求多次失败: ${url} — ${String(lastErr)}`);
 }
 
-// 把 AbortSignal 合并进 RequestInit
 function withSignal(init: RequestInit, signal?: AbortSignal): RequestInit {
   return signal ? { ...init, signal } : init;
 }
 
-// 让 setTimeout 能响应 abort，避免轮询期间无法取消
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -87,25 +80,6 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-// -------------------------- chat --------------------------
-
-export async function chat(
-  client: ApiClient,
-  model: string,
-  messages: Array<{ role: string; content: string }>,
-  signal?: AbortSignal,
-): Promise<string> {
-  const r = await requestWithRetry(`${client.baseUrl}/chat/completions`, withSignal({
-    method: "POST",
-    headers: authHeaders(client.apiKey),
-    body: JSON.stringify({ model, messages, stream: false }),
-  }, signal));
-  const j = await r.json();
-  return j.choices[0].message.content as string;
-}
-
-// ------------------------ 异步任务 ------------------------
-
 interface TaskOutput {
   task_status?: string;
   results?: Array<{ url: string }>;
@@ -113,6 +87,7 @@ interface TaskOutput {
   [k: string]: unknown;
 }
 
+// 两个 provider 的 /tasks/{id} 形状一致：output.task_status / results / video_url
 async function pollTask(
   client: ApiClient,
   taskId: string,
@@ -124,7 +99,7 @@ async function pollTask(
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-    const r = await requestWithRetry(`${client.baseUrl}/tasks/${taskId}`, withSignal({
+    const r = await requestWithRetry(`${client.provider.baseUrl}/tasks/${taskId}`, withSignal({
       method: "GET",
       headers: authHeaders(client.apiKey),
     }, signal));
@@ -139,7 +114,20 @@ async function pollTask(
   throw new Error(`[${label}] 超时: ${taskId}`);
 }
 
-// ------------------------ 文生图 (异步) ------------------------
+// ============================================================================
+// 公共 API —— 按 provider 分发
+// ============================================================================
+
+export async function chat(
+  client: ApiClient,
+  model: string,
+  messages: Array<{ role: string; content: string }>,
+  signal?: AbortSignal,
+): Promise<string> {
+  return client.provider.id === "dashscope"
+    ? chatDashScope(client, model, messages, signal)
+    : chatAliyunEdu(client, model, messages, signal);
+}
 
 export async function submitImage(
   client: ApiClient,
@@ -148,7 +136,80 @@ export async function submitImage(
   size = "1280*720",
   signal?: AbortSignal,
 ): Promise<string> {
-  const r = await requestWithRetry(`${client.baseUrl}/images/generations`, withSignal({
+  return client.provider.id === "dashscope"
+    ? submitImageDashScope(client, model, prompt, size, signal)
+    : submitImageAliyunEdu(client, model, prompt, size, signal);
+}
+
+export async function waitImage(
+  client: ApiClient,
+  taskId: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const out = await pollTask(client, taskId, 3_000, 300_000, `image#${taskId}`, signal);
+  return (out.results?.[0]?.url ?? "") as string;
+}
+
+export async function submitVideo(
+  client: ApiClient,
+  model: string,
+  prompt: string,
+  imageUrl: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  return client.provider.id === "dashscope"
+    ? submitVideoDashScope(client, model, prompt, imageUrl, signal)
+    : submitVideoAliyunEdu(client, model, prompt, imageUrl, signal);
+}
+
+export async function waitVideo(
+  client: ApiClient,
+  taskId: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const out = await pollTask(client, taskId, 10_000, 600_000, `video#${taskId}`, signal);
+  return (out.video_url ?? "") as string;
+}
+
+export async function tts(
+  client: ApiClient,
+  model: string,
+  text: string,
+  voice = "Cherry",
+  signal?: AbortSignal,
+): Promise<string> {
+  return client.provider.id === "dashscope"
+    ? ttsDashScope(client, model, text, voice, signal)
+    : ttsAliyunEdu(client, model, text, voice, signal);
+}
+
+// ============================================================================
+// Aliyun EDU (model-router) 实现 —— OpenAI 风格路径
+// ============================================================================
+
+async function chatAliyunEdu(
+  client: ApiClient,
+  model: string,
+  messages: Array<{ role: string; content: string }>,
+  signal?: AbortSignal,
+): Promise<string> {
+  const r = await requestWithRetry(`${client.provider.baseUrl}/chat/completions`, withSignal({
+    method: "POST",
+    headers: authHeaders(client.apiKey),
+    body: JSON.stringify({ model, messages, stream: false }),
+  }, signal));
+  const j = await r.json();
+  return j.choices[0].message.content as string;
+}
+
+async function submitImageAliyunEdu(
+  client: ApiClient,
+  model: string,
+  prompt: string,
+  size: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const r = await requestWithRetry(`${client.provider.baseUrl}/images/generations`, withSignal({
     method: "POST",
     headers: authHeaders(client.apiKey, { "X-MR-Async": "true" }),
     body: JSON.stringify({
@@ -161,25 +222,14 @@ export async function submitImage(
   return j.output.task_id as string;
 }
 
-export async function waitImage(
-  client: ApiClient,
-  taskId: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  const out = await pollTask(client, taskId, 3_000, 300_000, `image#${taskId}`, signal);
-  return (out.results?.[0]?.url ?? "") as string;
-}
-
-// ------------------------ 图生视频 (异步) ------------------------
-
-export async function submitVideo(
+async function submitVideoAliyunEdu(
   client: ApiClient,
   model: string,
   prompt: string,
   imageUrl: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const r = await requestWithRetry(`${client.baseUrl}/videos/generations`, withSignal({
+  const r = await requestWithRetry(`${client.provider.baseUrl}/videos/generations`, withSignal({
     method: "POST",
     headers: authHeaders(client.apiKey),
     body: JSON.stringify({
@@ -194,25 +244,14 @@ export async function submitVideo(
   return j.output.task_id as string;
 }
 
-export async function waitVideo(
-  client: ApiClient,
-  taskId: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  const out = await pollTask(client, taskId, 10_000, 600_000, `video#${taskId}`, signal);
-  return (out.video_url ?? "") as string;
-}
-
-// ------------------------ TTS (同步) ------------------------
-
-export async function tts(
+async function ttsAliyunEdu(
   client: ApiClient,
   model: string,
   text: string,
-  voice = "Cherry",
+  voice: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const r = await requestWithRetry(`${client.baseUrl}/audio/speech`, withSignal({
+  const r = await requestWithRetry(`${client.provider.baseUrl}/audio/speech`, withSignal({
     method: "POST",
     headers: authHeaders(client.apiKey),
     body: JSON.stringify({
@@ -221,6 +260,106 @@ export async function tts(
       voice,
     }),
   }, signal));
+  const j = await r.json();
+  return j.output.audio.url as string;
+}
+
+// ============================================================================
+// DashScope 原生实现 —— /services/aigc/* 路径 + X-DashScope-Async
+// 参考：https://help.aliyun.com/zh/model-studio/developer-reference/api-details
+// 注意：以下路径基于 DashScope 公开文档，部分模型（尤其 TTS）endpoint
+// 可能随模型族不同而需要调整，遇到 404/400 看 task_status FAILED 时优先核对。
+// ============================================================================
+
+async function chatDashScope(
+  client: ApiClient,
+  model: string,
+  messages: Array<{ role: string; content: string }>,
+  signal?: AbortSignal,
+): Promise<string> {
+  const r = await requestWithRetry(
+    `${client.provider.baseUrl}/services/aigc/text-generation/generation`,
+    withSignal({
+      method: "POST",
+      headers: authHeaders(client.apiKey),
+      body: JSON.stringify({
+        model,
+        input: { messages },
+        parameters: { result_format: "message" },
+      }),
+    }, signal),
+  );
+  const j = await r.json();
+  return j.output.choices[0].message.content as string;
+}
+
+async function submitImageDashScope(
+  client: ApiClient,
+  model: string,
+  prompt: string,
+  size: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const r = await requestWithRetry(
+    `${client.provider.baseUrl}/services/aigc/text2image/image-synthesis`,
+    withSignal({
+      method: "POST",
+      headers: authHeaders(client.apiKey, { "X-DashScope-Async": "enable" }),
+      body: JSON.stringify({
+        model,
+        input: { prompt },
+        parameters: { size, n: 1, prompt_extend: true },
+      }),
+    }, signal),
+  );
+  const j = await r.json();
+  return j.output.task_id as string;
+}
+
+async function submitVideoDashScope(
+  client: ApiClient,
+  model: string,
+  prompt: string,
+  imageUrl: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const r = await requestWithRetry(
+    `${client.provider.baseUrl}/services/aigc/video-generation/video-synthesis`,
+    withSignal({
+      method: "POST",
+      headers: authHeaders(client.apiKey, { "X-DashScope-Async": "enable" }),
+      body: JSON.stringify({
+        model,
+        input: { prompt, img_url: imageUrl },
+        parameters: {},
+      }),
+    }, signal),
+  );
+  const j = await r.json();
+  return j.output.task_id as string;
+}
+
+async function ttsDashScope(
+  client: ApiClient,
+  model: string,
+  text: string,
+  voice: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  // qwen-tts / qwen3-tts 同步 HTTP 入口（multimodal-generation）。
+  // 不同 TTS 模型族（CosyVoice 等）入口可能不同，必要时按模型分发。
+  const r = await requestWithRetry(
+    `${client.provider.baseUrl}/services/aigc/multimodal-generation/generation`,
+    withSignal({
+      method: "POST",
+      headers: authHeaders(client.apiKey),
+      body: JSON.stringify({
+        model,
+        input: { text, voice },
+        parameters: {},
+      }),
+    }, signal),
+  );
   const j = await r.json();
   return j.output.audio.url as string;
 }

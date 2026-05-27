@@ -10,16 +10,13 @@ import {
   submitVideo,
   waitVideo,
   tts,
-  resolveBaseUrl,
   type ApiClient,
 } from "./server-api";
 import { buildStoryboardSystem, buildStoryboardUser } from "./prompts";
 import {
-  DEFAULT_IMAGE_MODEL,
-  DEFAULT_STORYBOARD_MODEL,
-  DEFAULT_TTS_MODEL,
-  DEFAULT_VIDEO_MODEL,
+  getProviderMeta,
   type GenerateEvent,
+  type ProviderId,
   type SceneAsset,
   type Storyboard,
   type UserSettings,
@@ -28,7 +25,7 @@ import {
 export interface RunOptions {
   topic: string;
   apiKey: string;
-  baseUrl?: string;        // 可选，覆盖 env / 默认 URL
+  providerId?: ProviderId | string; // 不合法时回退到默认 provider
   settings: UserSettings;
   signal?: AbortSignal;
 }
@@ -70,13 +67,14 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 export async function runPipeline(opts: RunOptions, emit: Emit): Promise<void> {
-  const { topic, apiKey, baseUrl, settings, signal } = opts;
-  const client: ApiClient = { apiKey, baseUrl: resolveBaseUrl(baseUrl) };
-  // 用户留空时回退到默认模型
-  const storyboardModel = settings.storyboardModel?.trim() || DEFAULT_STORYBOARD_MODEL;
-  const imageModel = settings.imageModel?.trim() || DEFAULT_IMAGE_MODEL;
-  const videoModel = settings.videoModel?.trim() || DEFAULT_VIDEO_MODEL;
-  const ttsModel = settings.ttsModel?.trim() || DEFAULT_TTS_MODEL;
+  const { topic, apiKey, providerId, settings, signal } = opts;
+  const provider = getProviderMeta(providerId ?? settings.provider);
+  const client: ApiClient = { apiKey, provider };
+  // 模型用户留空时回退到该 provider 的默认（不同 provider 命名规则不同）
+  const storyboardModel = settings.storyboardModel?.trim() || provider.defaults.storyboardModel;
+  const imageModel = settings.imageModel?.trim() || provider.defaults.imageModel;
+  const videoModel = settings.videoModel?.trim() || provider.defaults.videoModel;
+  const ttsModel = settings.ttsModel?.trim() || provider.defaults.ttsModel;
   const runId = uid();
   emit({ type: "start", topic, runId });
 

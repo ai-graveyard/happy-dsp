@@ -48,45 +48,106 @@ export interface HistoryItem {
   finalUrl?: string;       // 合成后的视频 URL（blob: 或远程）
 }
 
+// ============================================================================
+// Provider —— 预设端点；URL 不让用户随便填，只能在已知列表里选。
+// 每个 provider 既有 baseUrl，也带一套该 provider 默认模型名（不同 provider
+// 模型命名规则不同，比如 model-router 用 `qwen/foo`，dashscope 原生用 `foo`）。
+// ============================================================================
+
+export type ProviderId = "dashscope" | "aliyun-edu";
+
+export interface ProviderMeta {
+  id: ProviderId;
+  label: string;          // Select 列表里显示的全名
+  short: string;          // Trigger 上的紧凑名
+  baseUrl: string;
+  defaults: {
+    storyboardModel: string;
+    imageModel: string;
+    videoModel: string;
+    ttsModel: string;
+  };
+  // 该 provider 推荐的视频模型 curated 列表（设置面板里下拉）
+  videoModels: readonly { id: string; label: string }[];
+}
+
+export const PROVIDERS: readonly ProviderMeta[] = [
+  {
+    id: "dashscope",
+    label: "DashScope · 阿里云百炼官方",
+    short: "DashScope",
+    baseUrl: "https://dashscope.aliyuncs.com/api/v1",
+    defaults: {
+      storyboardModel: "qwen-max",
+      imageModel: "wan2.5-t2i-preview",
+      videoModel: "wan2.5-i2v-preview",
+      ttsModel: "qwen3-tts-flash",
+    },
+    videoModels: [
+      { id: "wan2.5-i2v-preview", label: "Wan 2.5 i2v (preview)" },
+    ],
+  },
+  {
+    id: "aliyun-edu",
+    label: "Aliyun EDU · 教育版 model-router",
+    short: "Aliyun EDU",
+    baseUrl: "https://model-router.edu-aliyun.com/v1",
+    defaults: {
+      storyboardModel: "qwen/qwen3-max",
+      imageModel: "qwen/qwen-image-plus",
+      videoModel: "qwen/wan2.7-i2v",
+      ttsModel: "qwen/qwen3-tts-instruct-flash",
+    },
+    videoModels: [
+      { id: "qwen/wan2.7-i2v", label: "Wan 2.7 (写实/电影感)" },
+      { id: "qwen/happyhorse-1.0-i2v", label: "HappyHorse 1.0 (二次元/夸张)" },
+    ],
+  },
+] as const;
+
+const PROVIDERS_BY_ID = Object.fromEntries(
+  PROVIDERS.map((p) => [p.id, p]),
+) as Record<ProviderId, ProviderMeta>;
+
+export const DEFAULT_PROVIDER: ProviderId = "dashscope";
+
+export function isProviderId(id: unknown): id is ProviderId {
+  return typeof id === "string" && id in PROVIDERS_BY_ID;
+}
+
+// 找不到合法 id 时回退到默认 provider —— 给客户端/服务端都用
+export function getProviderMeta(id?: string | null): ProviderMeta {
+  return id && isProviderId(id) ? PROVIDERS_BY_ID[id] : PROVIDERS_BY_ID[DEFAULT_PROVIDER];
+}
+
 // 用户设置（存 localStorage）
 export interface UserSettings {
   apiKey: string;          // 用户自带 key；空表示用共享 key
-  apiBaseUrl: string;      // 自定义 API URL；空表示用默认/服务端 env
+  provider: ProviderId;    // API 端点预设（dashscope / aliyun-edu）
   numScenes: number;
   secondsPerScene: number;
   voice: string;
-  videoModel: string;      // 图生视频 (qwen/wan2.7-i2v 或 qwen/happyhorse-1.0-i2v)
-  storyboardModel: string; // 分镜文本生成
-  imageModel: string;      // 文生图
-  ttsModel: string;        // TTS
+  videoModel: string;      // 留空 = 用 provider.defaults.videoModel
+  storyboardModel: string; // 留空 = 用 provider.defaults.storyboardModel
+  imageModel: string;      // 留空 = 用 provider.defaults.imageModel
+  ttsModel: string;        // 留空 = 用 provider.defaults.ttsModel
   imageSize: string;       // 1280*720 / 720*1280
 }
 
-export const DEFAULT_API_BASE_URL = "https://dashscope.aliyuncs.com/api/v1";
-
-export const DEFAULT_STORYBOARD_MODEL = "qwen/qwen3-max";
-export const DEFAULT_IMAGE_MODEL = "qwen/qwen-image-plus";
-export const DEFAULT_VIDEO_MODEL = "qwen/wan2.7-i2v";
-export const DEFAULT_TTS_MODEL = "qwen/qwen3-tts-instruct-flash";
-
 export const DEFAULT_SETTINGS: UserSettings = {
   apiKey: "",
-  apiBaseUrl: "",
+  provider: DEFAULT_PROVIDER,
   numScenes: 5,
   secondsPerScene: 5,
   voice: "Cherry",
-  videoModel: DEFAULT_VIDEO_MODEL,
-  storyboardModel: DEFAULT_STORYBOARD_MODEL,
-  imageModel: DEFAULT_IMAGE_MODEL,
-  ttsModel: DEFAULT_TTS_MODEL,
+  videoModel: "",
+  storyboardModel: "",
+  imageModel: "",
+  ttsModel: "",
   imageSize: "1280*720",
 };
 
 export const TTS_VOICES = ["Cherry", "Serena", "Ethan", "Chelsie"] as const;
-export const VIDEO_MODELS = [
-  { id: "qwen/wan2.7-i2v", label: "Wan 2.7 (写实/电影感)" },
-  { id: "qwen/happyhorse-1.0-i2v", label: "HappyHorse 1.0 (二次元/夸张)" },
-] as const;
 export const IMAGE_SIZES = [
   { id: "1280*720", label: "横屏 16:9 (1280×720)" },
   { id: "720*1280", label: "竖屏 9:16 (720×1280)" },

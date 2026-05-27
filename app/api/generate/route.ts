@@ -1,12 +1,15 @@
 // POST /api/generate
-// 入参: { topic: string, settings: UserSettings }
+// 入参: { topic: string, settings: UserSettings }（settings.provider 决定端点预设）
 // header: x-mr-key（可选，用户自带 key；缺则用 env.SHARED_MR_KEY）
-// header: x-mr-base-url（可选，用户自定义 API URL；必须配合 x-mr-key 使用）
 // 出参: Server-Sent Events stream of GenerateEvent
 
 import { runPipeline } from "@/lib/pipeline";
-import type { GenerateEvent, UserSettings } from "@/lib/types";
-import { DEFAULT_SETTINGS } from "@/lib/types";
+import {
+  DEFAULT_SETTINGS,
+  isProviderId,
+  type GenerateEvent,
+  type UserSettings,
+} from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,35 +42,9 @@ export async function POST(req: Request) {
     );
   }
 
-  const userBaseUrl = (req.headers.get("x-mr-base-url") || "").trim();
-  let baseUrl: string | undefined;
-  if (userBaseUrl) {
-    // 自定义 URL 必须配合自带 key，否则共享 key 可能被发送到任意服务器
-    if (!userKey) {
-      return new Response(
-        JSON.stringify({
-          error: "自定义 API URL 必须配合自带 API Key 使用。",
-        }),
-        { status: 400, headers: { "content-type": "application/json" } },
-      );
-    }
-    try {
-      const u = new URL(userBaseUrl);
-      if (u.protocol !== "http:" && u.protocol !== "https:") {
-        throw new Error("scheme");
-      }
-      baseUrl = userBaseUrl;
-    } catch {
-      return new Response(
-        JSON.stringify({
-          error: "API URL 格式无效，需以 http:// 或 https:// 开头。",
-        }),
-        { status: 400, headers: { "content-type": "application/json" } },
-      );
-    }
-  }
-
   const settings: UserSettings = { ...DEFAULT_SETTINGS, ...(body.settings || {}) };
+  // provider 是预设列表中的 id；非法值由 getProviderMeta 兜底到默认
+  const providerId = isProviderId(settings.provider) ? settings.provider : undefined;
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -86,7 +63,7 @@ export async function POST(req: Request) {
 
       try {
         await runPipeline(
-          { topic, apiKey, baseUrl, settings, signal: req.signal },
+          { topic, apiKey, providerId, settings, signal: req.signal },
           send,
         );
       } catch (err) {

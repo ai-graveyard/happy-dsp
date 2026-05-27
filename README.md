@@ -31,8 +31,9 @@
 - ⚡ **全程并发**：图、视频、配音并行生成
 - 🔄 **SSE 实时进度**：每一帧/段视频/段配音一好就推回前端；顶部进度条按 关键帧 / 视频 / 配音 三轨展示 X/N，分镜卡片区分"排队 / 生成关键帧 / 生成视频"三态
 - 🎚️ **可调参数**：分镜数、单镜时长、横竖屏、TTS 音色
-- 🤖 **模型可换**：折叠的"模型配置"区列出每个功能用到的模型（分镜文本 / 文生图 / 图生视频 / TTS），留空即用默认值，兼容 OpenAI 协议
-- 🔑 **自带 Key + URL**：用户可自带 API Key 和自定义 API URL（仅存浏览器 localStorage），也可只用部署方提供的共享 Key；安全起见，自定义 URL 必须配合自带 Key
+- 🤖 **模型可换**：折叠的"模型配置"区列出每个功能用到的模型（分镜文本 / 文生图 / 图生视频 / TTS），留空即用所选 provider 的默认值
+- 🌐 **端点二选一**：API 端点不让随便填，只能在 `DashScope（阿里云百炼官方）` 或 `Aliyun EDU（教育版 model-router）` 间切换；切换后 pipeline 自动走对应路径（DashScope 用 `/services/aigc/*` + `X-DashScope-Async`，EDU 用 `/chat/completions` + `X-MR-Async`）
+- 🔑 **自带 / 共享 Key**：用户可自带 API Key（仅存浏览器 localStorage），也可只用部署方提供的共享 Key
 - 🕘 **localStorage 历史**：最近 20 条作品可一键复看
 - 📥 **一键下载**：合成完直接下载 mp4
 
@@ -76,18 +77,16 @@ docker run -d --name happy-dsp -p 3000:3000 --env-file .env happy-dsp
 `.env` 至少需要：
 
 ```env
-SHARED_MR_KEY=sk-xxxxxxxx                                  # 可选，共享 key（用户没自带 key 时回退到它）
-MR_BASE_URL=https://dashscope.aliyuncs.com/api/v1         # 可选，服务端默认 base url（用户没在设置里填自定义 URL 时用）
+SHARED_MR_KEY=sk-xxxxxxxx     # 可选，共享 key（用户没自带 key 时回退到它）
 ```
 
-> 用户在 UI 的"设置"里填的 API Key 和 API URL 优先级高于这两个环境变量，按请求覆盖。
+> API 端点（base URL）现在由设置面板里的 provider 选项决定，不再走环境变量。
 
 或直接 `-e` 传：
 
 ```bash
 docker run --rm -p 3000:3000 \
   -e SHARED_MR_KEY=sk-xxx \
-  -e MR_BASE_URL=https://dashscope.aliyuncs.com/api/v1 \
   happy-dsp
 ```
 
@@ -98,14 +97,14 @@ pnpm build
 pnpm start
 ```
 
-## API Key / URL / 模型 怎么配
+## API Key / 端点 / 模型 怎么配
 
 1. 去 [阿里云百炼控制台](https://bailian.console.aliyun.com/?tab=model#/api-key) 创建 key
 2. 在右上角 ⚙ 设置（或桌面左侧常驻设置面板）里：
    - **API Key**：粘贴你的 `sk-…`；留空则用部署方的 `SHARED_MR_KEY`
-   - **API URL**（可选）：填任意 OpenAI 协议兼容的 base url（如自建网关 / 其他厂商）。⚠️ 出于安全，自定义 URL 必须配合自带 API Key 才生效，避免共享 key 被发到任意端点
-   - **模型配置**（可选，默认折叠）：展开后可逐项覆盖 分镜文本 / 文生图 / 图生视频 / TTS 模型；留空回退到默认值。需要所选 API URL 端点支持该模型
-3. Key / URL 仅存在浏览器 localStorage，不会上传到任何服务器（除了直接调 API URL 指向的端点）
+   - **API 端点**：在 `DashScope（阿里云百炼官方）` 和 `Aliyun EDU（教育版 model-router）` 之间二选一。两者协议形状不同，pipeline 已按 provider 分发到对应路径（DashScope: `/services/aigc/*` + `X-DashScope-Async`；EDU: `/chat/completions`、`/images/generations` 等 + `X-MR-Async`）。默认 DashScope
+   - **模型配置**（可选，默认折叠）：展开后可逐项覆盖 分镜文本 / 文生图 / 图生视频 / TTS 模型；留空即用当前 provider 的默认值。⚠️ 两个 provider 的模型命名规则不同，切换 provider 后留空字段会按对应默认生效，自定义字段需要自行确认能在新 provider 下使用
+3. Key 仅存在浏览器 localStorage，不会上传到任何服务器（除了直接调所选 provider 的端点）
 
 ## 项目结构
 
