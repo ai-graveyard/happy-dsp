@@ -103,7 +103,7 @@ pnpm start
 1. 去 [阿里云百炼控制台](https://bailian.console.aliyun.com/?tab=model#/api-key) 创建 key
 2. 在右上角 ⚙ 设置（或桌面左侧常驻设置面板）里：
    - **API Key**：粘贴你的 `sk-…`；留空则用部署方的 `SHARED_MR_KEY`
-   - **API 端点**：在 `DashScope（阿里云百炼官方）` 和 `Aliyun EDU（教育版 model-router）` 之间二选一。两者协议形状不同，pipeline 已按 provider 分发到对应路径（DashScope: `/services/aigc/*` + `X-DashScope-Async`；EDU: `/chat/completions`、`/images/generations` 等 + `X-MR-Async`）。默认 DashScope
+   - **API 端点**：在 `DashScope（阿里云百炼官方）` 和 `Aliyun EDU（教育版 model-router）` 之间二选一。两者协议形状不同，pipeline 已按 provider 分发到对应路径（DashScope: `/services/aigc/*` + `X-DashScope-Async`；EDU: `/chat/completions`、`/images/generations` 等 + `X-MR-Async`）。默认 Aliyun EDU（图生视频默认 HappyHorse 1.0）
    - **模型配置**（可选，默认折叠）：展开后可逐项覆盖 分镜文本 / 文生图 / 图生视频 / TTS 模型；留空即用当前 provider 的默认值。⚠️ 两个 provider 的模型命名规则不同，切换 provider 后留空字段会按对应默认生效，自定义字段需要自行确认能在新 provider 下使用
 3. Key 仅存在浏览器 localStorage，不会上传到任何服务器（除了直接调所选 provider 的端点）
 

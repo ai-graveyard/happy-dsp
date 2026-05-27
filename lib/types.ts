@@ -97,12 +97,12 @@ export const PROVIDERS: readonly ProviderMeta[] = [
     defaults: {
       storyboardModel: "qwen/qwen3-max",
       imageModel: "qwen/qwen-image-plus",
-      videoModel: "qwen/wan2.7-i2v",
+      videoModel: "qwen/happyhorse-1.0-i2v",
       ttsModel: "qwen/qwen3-tts-instruct-flash",
     },
     videoModels: [
+      { id: "qwen/happyhorse-1.0-i2v", label: "HappyHorse 1.0 (二次元/夸张, 默认)" },
       { id: "qwen/wan2.7-i2v", label: "Wan 2.7 (写实/电影感)" },
-      { id: "qwen/happyhorse-1.0-i2v", label: "HappyHorse 1.0 (二次元/夸张)" },
     ],
   },
 ] as const;
@@ -111,7 +111,7 @@ const PROVIDERS_BY_ID = Object.fromEntries(
   PROVIDERS.map((p) => [p.id, p]),
 ) as Record<ProviderId, ProviderMeta>;
 
-export const DEFAULT_PROVIDER: ProviderId = "dashscope";
+export const DEFAULT_PROVIDER: ProviderId = "aliyun-edu";
 
 export function isProviderId(id: unknown): id is ProviderId {
   return typeof id === "string" && id in PROVIDERS_BY_ID;
