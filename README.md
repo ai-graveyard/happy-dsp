@@ -77,7 +77,7 @@ docker run -d --name happy-dsp -p 3000:3000 --env-file .env happy-dsp
 
 ```env
 SHARED_MR_KEY=sk-xxxxxxxx                                  # 可选，共享 key（用户没自带 key 时回退到它）
-MR_BASE_URL=https://model-router.edu-aliyun.com/v1         # 可选，服务端默认 base url（用户没在设置里填自定义 URL 时用）
+MR_BASE_URL=https://dashscope.aliyuncs.com/api/v1         # 可选，服务端默认 base url（用户没在设置里填自定义 URL 时用）
 ```
 
 > 用户在 UI 的"设置"里填的 API Key 和 API URL 优先级高于这两个环境变量，按请求覆盖。
@@ -87,7 +87,7 @@ MR_BASE_URL=https://model-router.edu-aliyun.com/v1         # 可选，服务端�
 ```bash
 docker run --rm -p 3000:3000 \
   -e SHARED_MR_KEY=sk-xxx \
-  -e MR_BASE_URL=https://model-router.edu-aliyun.com/v1 \
+  -e MR_BASE_URL=https://dashscope.aliyuncs.com/api/v1 \
   happy-dsp
 ```
 

@@ -62,7 +62,7 @@ export interface UserSettings {
   imageSize: string;       // 1280*720 / 720*1280
 }
 
-export const DEFAULT_API_BASE_URL = "https://model-router.edu-aliyun.com/v1";
+export const DEFAULT_API_BASE_URL = "https://dashscope.aliyuncs.com/api/v1";
 
 export const DEFAULT_STORYBOARD_MODEL = "qwen/qwen3-max";
 export const DEFAULT_IMAGE_MODEL = "qwen/qwen-image-plus";
