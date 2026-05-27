@@ -47,8 +47,9 @@ function probeDuration(cmd: string, path: string): Promise<number> {
   return new Promise((resolve, reject) => {
     // ffprobe 通常和 ffmpeg 在同一目录；这里直接用 ffmpeg 走 -i 解析
     // 为减少依赖，用 ffmpeg 自身 + format 输出
+    // ffmpeg prints "Duration:" at info level; -v error would suppress it.
     const p = spawn(cmd, [
-      "-v", "error",
+      "-hide_banner",
       "-i", path,
       "-f", "null", "-",
     ]);
@@ -67,7 +68,9 @@ function probeDuration(cmd: string, path: string): Promise<number> {
 
 function escDrawtext(s: string): string {
   return s
+    .replace(/[\r\n]+/g, " ") // 旁白若含换行会破坏 drawtext，压成单行
     .replace(/\\/g, "\\\\")
+    .replace(/%/g, "\\%")
     .replace(/:/g, "\\:")
     .replace(/'/g, "\\'")
     .replace(/,/g, "\\,");
@@ -101,15 +104,16 @@ export async function POST(req: Request) {
     }
 
     const mixedFiles: string[] = [];
-    let idx = 0;
     for (const s of body.storyboard.scenes) {
       const a = assetMap.get(s.id);
       if (!a?.videoUrl || !a?.audioUrl) continue;
 
       const vPath = join(work, `clip_${s.id}.mp4`);
       const aPath = join(work, `audio_${s.id}.mp3`);
-      await downloadTo(a.videoUrl, vPath);
-      await downloadTo(a.audioUrl, aPath);
+      await Promise.all([
+        downloadTo(a.videoUrl, vPath),
+        downloadTo(a.audioUrl, aPath),
+      ]);
 
       const dur = await probeDuration(FFMPEG, vPath);
 
@@ -132,7 +136,6 @@ export async function POST(req: Request) {
         outPath,
       ]);
       mixedFiles.push(outPath);
-      idx++;
     }
 
     if (mixedFiles.length === 0) {

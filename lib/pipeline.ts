@@ -10,19 +10,27 @@ import {
   submitVideo,
   waitVideo,
   tts,
+  resolveBaseUrl,
+  type ApiClient,
 } from "./server-api";
 import { buildStoryboardSystem, buildStoryboardUser } from "./prompts";
-import type {
-  GenerateEvent,
-  SceneAsset,
-  Storyboard,
-  UserSettings,
+import {
+  DEFAULT_IMAGE_MODEL,
+  DEFAULT_STORYBOARD_MODEL,
+  DEFAULT_TTS_MODEL,
+  DEFAULT_VIDEO_MODEL,
+  type GenerateEvent,
+  type SceneAsset,
+  type Storyboard,
+  type UserSettings,
 } from "./types";
 
 export interface RunOptions {
   topic: string;
   apiKey: string;
+  baseUrl?: string;        // 可选，覆盖 env / 默认 URL
   settings: UserSettings;
+  signal?: AbortSignal;
 }
 
 type Emit = (e: GenerateEvent) => void;
@@ -37,8 +45,38 @@ function uid(): string {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 
+// 异常类型守卫 —— 让所有 abort 路径只关心 name === "AbortError"
+function isAbort(e: unknown): boolean {
+  return (e as Error)?.name === "AbortError";
+}
+
+// 让 setTimeout 能响应 abort，避免错峰等待期间无法取消
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const t = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    function onAbort() {
+      clearTimeout(t);
+      reject(new DOMException("Aborted", "AbortError"));
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export async function runPipeline(opts: RunOptions, emit: Emit): Promise<void> {
-  const { topic, apiKey, settings } = opts;
+  const { topic, apiKey, baseUrl, settings, signal } = opts;
+  const client: ApiClient = { apiKey, baseUrl: resolveBaseUrl(baseUrl) };
+  // 用户留空时回退到默认模型
+  const storyboardModel = settings.storyboardModel?.trim() || DEFAULT_STORYBOARD_MODEL;
+  const imageModel = settings.imageModel?.trim() || DEFAULT_IMAGE_MODEL;
+  const videoModel = settings.videoModel?.trim() || DEFAULT_VIDEO_MODEL;
+  const ttsModel = settings.ttsModel?.trim() || DEFAULT_TTS_MODEL;
   const runId = uid();
   emit({ type: "start", topic, runId });
 
@@ -46,16 +84,25 @@ export async function runPipeline(opts: RunOptions, emit: Emit): Promise<void> {
   emit({ type: "log", message: "拆分镜中..." });
   const sys = buildStoryboardSystem(settings.numScenes, settings.secondsPerScene);
   const user = buildStoryboardUser(topic);
-  const raw = await chat(apiKey, "qwen/qwen3-max", [
+  const raw = await chat(client, storyboardModel, [
     { role: "system", content: sys },
     { role: "user", content: user },
-  ]);
-  const sb = JSON.parse(stripJsonFence(raw)) as Storyboard;
+  ], signal);
+  let sb: Storyboard;
+  try {
+    sb = JSON.parse(stripJsonFence(raw)) as Storyboard;
+  } catch {
+    throw new Error(`分镜 JSON 解析失败: ${raw.slice(0, 200)}`);
+  }
+  if (!Array.isArray(sb.scenes) || sb.scenes.length === 0) {
+    throw new Error("分镜结果中没有 scenes");
+  }
   // 把 global_style + main_character 拼到每个 image_prompt 前
   for (const s of sb.scenes) {
     s.full_image_prompt =
       `${sb.global_style}, ${sb.main_character}, ${s.image_prompt}`;
   }
+  sb.imageSize = settings.imageSize;
   emit({ type: "storyboard", data: sb });
 
   // 全程跟踪每个分镜的产物
@@ -67,47 +114,66 @@ export async function runPipeline(opts: RunOptions, emit: Emit): Promise<void> {
   const imageTasks = new Map<number, string>();
   for (const s of sb.scenes) {
     const tid = await submitImage(
-      apiKey,
+      client,
+      imageModel,
       s.full_image_prompt!,
       settings.imageSize,
+      signal,
     );
     imageTasks.set(s.id, tid);
     emit({ type: "frame_submitted", sceneId: s.id });
-    await new Promise((r) => setTimeout(r, 1500));
+    await sleep(1500, signal);
   }
 
   // --------- Step 2b: 并发等图 → 收到后立即触发图生视频 ---------
   emit({ type: "log", message: "等待关键帧 + 启动视频生成..." });
   const videoTasks = new Map<number, string>();
+  // 任意两次 submitVideo 间至少 800ms（按完成顺序），避免短时高并发触发 429
+  const VIDEO_SUBMIT_GAP_MS = 800;
+  let nextVideoSubmitAt = 0;
 
   const imageThenVideo = Array.from(imageTasks.entries()).map(
-    async ([sceneId, tid], idx) => {
-      const imageUrl = await waitImage(apiKey, tid);
-      assets.set(sceneId, { ...assets.get(sceneId)!, imageUrl });
-      emit({ type: "frame_done", sceneId, imageUrl });
+    async ([sceneId, tid]) => {
+      try {
+        const imageUrl = await waitImage(client, tid, signal);
+        assets.set(sceneId, { ...assets.get(sceneId)!, imageUrl });
+        emit({ type: "frame_done", sceneId, imageUrl });
 
-      // 错开提交视频（每段 +0.8s）
-      await new Promise((r) => setTimeout(r, 800 * idx));
+        const now = Date.now();
+        const wait = Math.max(0, nextVideoSubmitAt - now);
+        // 立即占据下一个槽位，让并发的其他分镜排到它之后
+        nextVideoSubmitAt = Math.max(now, nextVideoSubmitAt) + VIDEO_SUBMIT_GAP_MS;
+        if (wait > 0) await sleep(wait, signal);
 
-      const scene = sb.scenes.find((x) => x.id === sceneId)!;
-      const vtid = await submitVideo(
-        apiKey,
-        settings.videoModel,
-        scene.video_motion,
-        imageUrl,
-      );
-      videoTasks.set(sceneId, vtid);
-      emit({ type: "video_submitted", sceneId });
+        const scene = sb.scenes.find((x) => x.id === sceneId)!;
+        const vtid = await submitVideo(
+          client,
+          videoModel,
+          scene.video_motion,
+          imageUrl,
+          signal,
+        );
+        videoTasks.set(sceneId, vtid);
+        emit({ type: "video_submitted", sceneId });
+      } catch (err) {
+        if (isAbort(err)) throw err;
+        emit({
+          type: "error",
+          sceneId,
+          message: `关键帧/视频提交失败: ${(err as Error).message}`,
+        });
+      }
     },
   );
 
   // --------- Step 3 (TTS): 与图/视频完全并行 ---------
   const ttsPromises = sb.scenes.map(async (s) => {
     try {
-      const audioUrl = await tts(apiKey, s.narration, settings.voice);
+      const audioUrl = await tts(client, ttsModel, s.narration, settings.voice, signal);
       assets.set(s.id, { ...assets.get(s.id)!, audioUrl });
       emit({ type: "audio_done", sceneId: s.id, audioUrl });
     } catch (err) {
+      if (isAbort(err)) throw err;
       emit({
         type: "error",
         sceneId: s.id,
@@ -123,10 +189,11 @@ export async function runPipeline(opts: RunOptions, emit: Emit): Promise<void> {
   const videoWaits = Array.from(videoTasks.entries()).map(
     async ([sceneId, tid]) => {
       try {
-        const videoUrl = await waitVideo(apiKey, tid);
+        const videoUrl = await waitVideo(client, tid, signal);
         assets.set(sceneId, { ...assets.get(sceneId)!, videoUrl });
         emit({ type: "video_done", sceneId, videoUrl });
       } catch (err) {
+        if (isAbort(err)) throw err;
         emit({
           type: "error",
           sceneId,
@@ -138,5 +205,6 @@ export async function runPipeline(opts: RunOptions, emit: Emit): Promise<void> {
 
   await Promise.all([...videoWaits, ...ttsPromises]);
 
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
   emit({ type: "complete", assets: Array.from(assets.values()) });
 }

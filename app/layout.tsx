@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -18,6 +18,15 @@ export const metadata: Metadata = {
     "输入一句话主题，2-3 分钟生成一条带配音的短视频。基于通义 Qwen 全模态 (qwen3-max / wan2.7-i2v / qwen-image-plus / qwen3-tts)。",
 };
 
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#fafafa" },
+    { media: "(prefers-color-scheme: dark)", color: "#1f1f1f" },
+  ],
+};
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -25,7 +34,7 @@ export default function RootLayout({
 }>) {
   return (
     <html
-      lang="en"
+      lang="zh-CN"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">{children}</body>

@@ -29,9 +29,10 @@
 
 - 🎨 **画风一致性**：global_style + main_character 自动拼接到每一帧
 - ⚡ **全程并发**：图、视频、配音并行生成
-- 🔄 **SSE 实时进度**：每一帧/段视频/段配音一好就推回前端
-- 🎚️ **可调参数**：分镜数、单镜时长、横竖屏、TTS 音色、视频模型
-- 🔑 **双 Key 模式**：用户可自带 Key（存浏览器 localStorage），或用部署方提供的共享 Key
+- 🔄 **SSE 实时进度**：每一帧/段视频/段配音一好就推回前端；顶部进度条按 关键帧 / 视频 / 配音 三轨展示 X/N，分镜卡片区分"排队 / 生成关键帧 / 生成视频"三态
+- 🎚️ **可调参数**：分镜数、单镜时长、横竖屏、TTS 音色
+- 🤖 **模型可换**：折叠的"模型配置"区列出每个功能用到的模型（分镜文本 / 文生图 / 图生视频 / TTS），留空即用默认值，兼容 OpenAI 协议
+- 🔑 **自带 Key + URL**：用户可自带 API Key 和自定义 API URL（仅存浏览器 localStorage），也可只用部署方提供的共享 Key；安全起见，自定义 URL 必须配合自带 Key
 - 🕘 **localStorage 历史**：最近 20 条作品可一键复看
 - 📥 **一键下载**：合成完直接下载 mp4
 
@@ -49,7 +50,7 @@ cp .env.example .env              # 可选：填共享 key
 pnpm dev
 ```
 
-打开 http://localhost:3000 ，点右上角 ⚙ 设置 → 填入你的 sk-xxx → 开始生成。
+打开 http://localhost:3000 ，在桌面左侧设置面板（移动端在右上角 ⚙）填入你的 sk-xxx → 开始生成。如需用其他兼容端点 / 自定义模型，把"API URL"和折叠的"模型配置"展开即可逐项覆盖。
 
 > ⚠️ 系统依赖：`ffmpeg-static` 会自动安装跨平台的 ffmpeg 二进制，不需要单独装 ffmpeg。
 
@@ -75,9 +76,11 @@ docker run -d --name happy-dsp -p 3000:3000 --env-file .env happy-dsp
 `.env` 至少需要：
 
 ```env
-SHARED_MR_KEY=sk-xxxxxxxx                                  # 可选，共享 key
-MR_BASE_URL=https://model-router.edu-aliyun.com/v1         # 可选，覆盖默认 base url
+SHARED_MR_KEY=sk-xxxxxxxx                                  # 可选，共享 key（用户没自带 key 时回退到它）
+MR_BASE_URL=https://model-router.edu-aliyun.com/v1         # 可选，服务端默认 base url（用户没在设置里填自定义 URL 时用）
 ```
+
+> 用户在 UI 的"设置"里填的 API Key 和 API URL 优先级高于这两个环境变量，按请求覆盖。
 
 或直接 `-e` 传：
 
@@ -95,32 +98,39 @@ pnpm build
 pnpm start
 ```
 
-## API Key 怎么搞
+## API Key / URL / 模型 怎么配
 
 1. 去 [阿里云百炼控制台](https://bailian.console.aliyun.com/?tab=model#/api-key) 创建 key
-2. 复制粘贴到右上角 ⚙ 设置里
-3. Key 仅存在你的浏览器 localStorage，不会上传到任何服务器（除了直接调 ModelRouter）
+2. 在右上角 ⚙ 设置（或桌面左侧常驻设置面板）里：
+   - **API Key**：粘贴你的 `sk-…`；留空则用部署方的 `SHARED_MR_KEY`
+   - **API URL**（可选）：填任意 OpenAI 协议兼容的 base url（如自建网关 / 其他厂商）。⚠️ 出于安全，自定义 URL 必须配合自带 API Key 才生效，避免共享 key 被发到任意端点
+   - **模型配置**（可选，默认折叠）：展开后可逐项覆盖 分镜文本 / 文生图 / 图生视频 / TTS 模型；留空回退到默认值。需要所选 API URL 端点支持该模型
+3. Key / URL 仅存在浏览器 localStorage，不会上传到任何服务器（除了直接调 API URL 指向的端点）
 
 ## 项目结构
 
 ```
-web/
+happy-dsp/
 ├── app/
 │   ├── page.tsx                    # 主页（输入 + 实时进度 + 成片）
 │   ├── layout.tsx
+│   ├── globals.css
 │   └── api/
 │       ├── generate/route.ts       # SSE 流式 pipeline
 │       └── merge/route.ts          # ffmpeg 合成
 ├── components/
-│   ├── SceneCard.tsx               # 单分镜卡片（进度可视化）
-│   ├── SettingsDrawer.tsx
-│   └── HistoryDrawer.tsx
+│   ├── SceneCard.tsx               # 单分镜卡片（排队/生成关键帧/生成视频 多态）
+│   ├── ProgressStrip.tsx           # 全局进度条（拆分镜 / 三轨计数 / 合成）
+│   ├── SettingsPanel.tsx           # 设置面板（桌面常驻 / 移动抽屉复用）
+│   ├── HistoryDrawer.tsx
+│   └── ui/                         # 基础组件（button/input/sheet/...）
 ├── lib/
 │   ├── types.ts                    # 共享 TS 类型 + 默认设置
 │   ├── prompts.ts                  # 分镜师 system prompt
 │   ├── server-api.ts               # ModelRouter 调用封装 (chat / 异步图 / 异步视频 / TTS)
 │   ├── pipeline.ts                 # 主编排（发 GenerateEvent）
-│   └── storage.ts                  # localStorage 工具
+│   ├── storage.ts                  # localStorage 工具
+│   └── utils.ts                    # cn() 等小工具
 └── .env.example
 ```
 

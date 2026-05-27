@@ -13,6 +13,9 @@ export interface Storyboard {
   global_style: string;
   main_character: string;
   scenes: Scene[];
+  // Stamped by the server pipeline so the UI can render previews with the
+  // right aspect ratio even after the user changes settings or loads history.
+  imageSize?: string;
 }
 
 export interface SceneAsset {
@@ -48,19 +51,34 @@ export interface HistoryItem {
 // 用户设置（存 localStorage）
 export interface UserSettings {
   apiKey: string;          // 用户自带 key；空表示用共享 key
+  apiBaseUrl: string;      // 自定义 API URL；空表示用默认/服务端 env
   numScenes: number;
   secondsPerScene: number;
   voice: string;
-  videoModel: string;      // qwen/wan2.7-i2v 或 qwen/happyhorse-1.0-i2v
+  videoModel: string;      // 图生视频 (qwen/wan2.7-i2v 或 qwen/happyhorse-1.0-i2v)
+  storyboardModel: string; // 分镜文本生成
+  imageModel: string;      // 文生图
+  ttsModel: string;        // TTS
   imageSize: string;       // 1280*720 / 720*1280
 }
 
+export const DEFAULT_API_BASE_URL = "https://model-router.edu-aliyun.com/v1";
+
+export const DEFAULT_STORYBOARD_MODEL = "qwen/qwen3-max";
+export const DEFAULT_IMAGE_MODEL = "qwen/qwen-image-plus";
+export const DEFAULT_VIDEO_MODEL = "qwen/wan2.7-i2v";
+export const DEFAULT_TTS_MODEL = "qwen/qwen3-tts-instruct-flash";
+
 export const DEFAULT_SETTINGS: UserSettings = {
   apiKey: "",
+  apiBaseUrl: "",
   numScenes: 5,
   secondsPerScene: 5,
   voice: "Cherry",
-  videoModel: "qwen/wan2.7-i2v",
+  videoModel: DEFAULT_VIDEO_MODEL,
+  storyboardModel: DEFAULT_STORYBOARD_MODEL,
+  imageModel: DEFAULT_IMAGE_MODEL,
+  ttsModel: DEFAULT_TTS_MODEL,
   imageSize: "1280*720",
 };
 
