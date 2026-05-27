@@ -15,6 +15,7 @@ import {
 import { buildStoryboardSystem, buildStoryboardUser } from "./prompts";
 import {
   getProviderMeta,
+  getStylePreset,
   type GenerateEvent,
   type ProviderId,
   type SceneAsset,
@@ -79,8 +80,19 @@ export async function runPipeline(opts: RunOptions, emit: Emit): Promise<void> {
   emit({ type: "start", topic, runId });
 
   // --------- Step 1: 拆分镜 ---------
-  emit({ type: "log", message: "拆分镜中..." });
-  const sys = buildStoryboardSystem(settings.numScenes, settings.secondsPerScene);
+  const stylePreset = getStylePreset(settings.style);
+  const styleKeywords = stylePreset.keywords.trim();
+  emit({
+    type: "log",
+    message: styleKeywords
+      ? `拆分镜中... (风格: ${stylePreset.label})`
+      : "拆分镜中...",
+  });
+  const sys = buildStoryboardSystem(
+    settings.numScenes,
+    settings.secondsPerScene,
+    styleKeywords || undefined,
+  );
   const user = buildStoryboardUser(topic);
   const raw = await chat(client, storyboardModel, [
     { role: "system", content: sys },
@@ -94,6 +106,11 @@ export async function runPipeline(opts: RunOptions, emit: Emit): Promise<void> {
   }
   if (!Array.isArray(sb.scenes) || sb.scenes.length === 0) {
     throw new Error("分镜结果中没有 scenes");
+  }
+  // 非 auto 时强制覆盖 global_style —— 模型偶尔会自己 "微调" 风格描述，
+  // 直接覆盖保证用户选的风格 100% 落到下游图/视频 prompt。
+  if (styleKeywords) {
+    sb.global_style = styleKeywords;
   }
   // 把 global_style + main_character 拼到每个 image_prompt 前
   for (const s of sb.scenes) {

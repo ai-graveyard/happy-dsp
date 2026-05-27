@@ -33,10 +33,13 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import {
+  deleteFinalBlob,
+  loadFinalBlob,
   loadHistory,
   loadSettings,
   pushHistory,
   removeHistory,
+  saveFinalBlob,
   saveSettings,
   subscribeHistory,
   subscribeSettings,
@@ -44,6 +47,8 @@ import {
 import { cn } from "@/lib/utils";
 import {
   getProviderMeta,
+  getStylePreset,
+  STYLE_PRESETS,
   type GenerateEvent,
   type HistoryItem,
   type SceneAsset,
@@ -79,6 +84,11 @@ export default function HomePage() {
   const [finalUrl, setFinalUrl] = useState<string | null>(null);
   const [merging, setMerging] = useState(false);
   const [loadedFromHistory, setLoadedFromHistory] = useState(false);
+  // 从历史加载时，去 IndexedDB 取回成片的状态机：
+  // null = 没在加载历史；"loading" = 正在取；"missing" = 取不到（老数据 / 已删）
+  const [historyFinalState, setHistoryFinalState] = useState<
+    null | "loading" | "missing"
+  >(null);
   // 跟踪每个分镜是否已提交关键帧请求；用于区分 "排队中" vs "生成中"
   const [framesSubmitted, setFramesSubmitted] = useState<Record<number, true>>({});
   // 用于显示运行时长，每 1s tick 一次（startedAt 为 null 时 elapsed 显示 0）
@@ -186,6 +196,7 @@ export default function HomePage() {
     if (finalUrl) URL.revokeObjectURL(finalUrl);
     setFinalUrl(null);
     setLoadedFromHistory(false);
+    setHistoryFinalState(null);
     setStartedAt(Date.now());
     setNow(Date.now());
 
@@ -246,21 +257,15 @@ export default function HomePage() {
     setPhase("idle");
   }
 
-  // 所有分镜齐了 → 自动 merge（从历史加载的不重新合成，避免远端 URL 已过期）
-  useEffect(() => {
-    if (phase !== "done" || !storyboard || loadedFromHistory) return;
-    const allSettled = storyboard.scenes.every((s) => {
-      if (sceneErrors[s.id]) return true; // 失败的分镜跳过
-      const a = assets[s.id];
-      return a?.videoUrl && a?.audioUrl;
-    });
-    const hasAnyUsable = storyboard.scenes.some((s) => {
-      const a = assets[s.id];
-      return a?.videoUrl && a?.audioUrl;
-    });
-    if (!allSettled || !hasAnyUsable || finalUrl || merging) return;
-
-    (async () => {
+  // 真正干合成活的函数：调 /api/merge → blob → IndexedDB → 屏幕。
+  // 自动合成和"重新合成"按钮都走这里。
+  // pushHistoryItem=true 时把这次合成写进历史索引（首次生成路径）；
+  // 从历史回看时重新合成，索引已经在了，只需刷新 blob 缓存。
+  const runMerge = useCallback(
+    async (pushHistoryItem: boolean) => {
+      if (!storyboard) return;
+      const runId = runIdRef.current;
+      setError(null);
       setMerging(true);
       try {
         const res = await fetch("/api/merge", {
@@ -276,26 +281,53 @@ export default function HomePage() {
           throw new Error(j.error || `merge failed: ${res.status}`);
         }
         const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        setFinalUrl(url);
+        // 竞态守卫：用户在合成期间又切到了别的历史项，丢弃这次结果
+        if (runIdRef.current !== runId) return;
+        if (finalUrlRef.current) URL.revokeObjectURL(finalUrlRef.current);
+        setFinalUrl(URL.createObjectURL(blob));
+        setHistoryFinalState(null);
 
-        if (runIdRef.current) {
-          const item: HistoryItem = {
-            runId: runIdRef.current,
-            topic: topic.trim(),
-            createdAt: Date.now(),
-            storyboard,
-            assets: Object.values(assets),
-          };
-          pushHistory(item);
+        if (runId) {
+          await saveFinalBlob(runId, blob).catch(() => {
+            // 配额满 / 隐私模式 / 等等。失败也不影响本次播放，只是回看时取不到
+          });
+          if (pushHistoryItem) {
+            const item: HistoryItem = {
+              runId,
+              topic: topic.trim(),
+              createdAt: Date.now(),
+              storyboard,
+              assets: Object.values(assets),
+            };
+            pushHistory(item);
+          }
         }
       } catch (err) {
+        if (runIdRef.current !== runId) return;
         setError((err as Error).message);
       } finally {
-        setMerging(false);
+        if (runIdRef.current === runId) setMerging(false);
       }
-    })();
-  }, [phase, storyboard, assets, sceneErrors, finalUrl, merging, topic, loadedFromHistory]);
+    },
+    [storyboard, assets, topic],
+  );
+
+  // 所有分镜齐了 → 自动 merge（从历史加载的不重新合成，避免远端 URL 已过期）
+  useEffect(() => {
+    if (phase !== "done" || !storyboard || loadedFromHistory) return;
+    const allSettled = storyboard.scenes.every((s) => {
+      if (sceneErrors[s.id]) return true; // 失败的分镜跳过
+      const a = assets[s.id];
+      return a?.videoUrl && a?.audioUrl;
+    });
+    const hasAnyUsable = storyboard.scenes.some((s) => {
+      const a = assets[s.id];
+      return a?.videoUrl && a?.audioUrl;
+    });
+    if (!allSettled || !hasAnyUsable || finalUrl || merging) return;
+
+    runMerge(true);
+  }, [phase, storyboard, assets, sceneErrors, finalUrl, merging, loadedFromHistory, runMerge]);
 
   function loadFromHistory(item: HistoryItem) {
     setTopic(item.topic);
@@ -308,10 +340,30 @@ export default function HomePage() {
     setFinalUrl(null);
     setError(null);
     setLoadedFromHistory(true);
+    runIdRef.current = item.runId;
+    setHistoryFinalState("loading");
+
+    // 异步取回 IndexedDB 里缓存的成片。
+    // 用 runIdRef 做竞态守卫：快速切换历史项时只兑现最后一次点的那条。
+    loadFinalBlob(item.runId)
+      .then((blob) => {
+        if (runIdRef.current !== item.runId) return;
+        if (blob) {
+          setFinalUrl(URL.createObjectURL(blob));
+          setHistoryFinalState(null);
+        } else {
+          setHistoryFinalState("missing");
+        }
+      })
+      .catch(() => {
+        if (runIdRef.current !== item.runId) return;
+        setHistoryFinalState("missing");
+      });
   }
 
   function removeFromHistory(id: string) {
     removeHistory(id);
+    deleteFinalBlob(id).catch(() => {});
   }
 
   const orderedScenes = storyboard?.scenes ?? [];
@@ -431,6 +483,11 @@ export default function HomePage() {
                     <span>≈ {totalSeconds}s</span>
                     <span className="text-border">·</span>
                     <span>
+                      {getStylePreset(settings.style).emoji}{" "}
+                      {getStylePreset(settings.style).label}
+                    </span>
+                    <span className="text-border">·</span>
+                    <span>
                       {getProviderMeta(settings.provider).short}
                     </span>
                     <span className="text-border">·</span>
@@ -461,6 +518,42 @@ export default function HomePage() {
                       {s}
                     </button>
                   ))}
+                </div>
+
+                <div className="space-y-2 pt-1">
+                  <div className="flex items-baseline justify-between">
+                    <div className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+                      风格
+                    </div>
+                    <div className="text-[10px] text-muted-foreground">
+                      {getStylePreset(settings.style).hint}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {STYLE_PRESETS.map((s) => {
+                      const active = settings.style === s.id;
+                      return (
+                        <button
+                          key={s.id}
+                          onClick={() =>
+                            saveSettings({ ...settings, style: s.id })
+                          }
+                          disabled={isRunning}
+                          title={s.hint}
+                          aria-pressed={active}
+                          className={cn(
+                            "text-xs px-2.5 py-1 rounded-sm border transition disabled:opacity-50 inline-flex items-center gap-1",
+                            active
+                              ? "border-foreground text-foreground bg-foreground/5"
+                              : "border-border text-muted-foreground hover:border-foreground/40 hover:text-foreground",
+                          )}
+                        >
+                          <span aria-hidden="true">{s.emoji}</span>
+                          <span>{s.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
 
@@ -564,7 +657,7 @@ export default function HomePage() {
               </section>
             )}
 
-            {(phase === "done" || finalUrl) && storyboard && !loadedFromHistory && (
+            {(phase === "done" || finalUrl) && storyboard && (
               <section className="space-y-3">
                 <div className="flex items-end justify-between">
                   <div>
@@ -605,6 +698,35 @@ export default function HomePage() {
                       </a>
                     </Button>
                   </div>
+                ) : loadedFromHistory && !merging ? (
+                  <div
+                    className={cn(
+                      "rounded-md border border-dashed border-border bg-card/30 flex flex-col items-center justify-center text-xs gap-3 text-muted-foreground p-4",
+                      previewAspectClass,
+                      isPortrait ? "max-w-xs mx-auto" : "",
+                    )}
+                  >
+                    {historyFinalState === "loading" ? (
+                      <div className="flex items-center gap-2">
+                        <Loader2 className="size-3.5 animate-spin" />
+                        <span>正在加载本地缓存的成片…</span>
+                      </div>
+                    ) : (
+                      <>
+                        <span className="text-center">
+                          本地未缓存成片。可以基于已有的分镜素材重新跑一次 ffmpeg 合成（不会重新生图/视频/配音）。
+                        </span>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => runMerge(false)}
+                        >
+                          <Sparkles className="size-3.5" />
+                          重新合成
+                        </Button>
+                      </>
+                    )}
+                  </div>
                 ) : allFailed ? (
                   <div className="text-sm text-destructive">
                     所有分镜都失败了，无法合成。请检查 API Key 或重试。
@@ -638,7 +760,7 @@ export default function HomePage() {
 
             {loadedFromHistory && storyboard && (
               <div className="text-xs text-muted-foreground border-l-2 border-border pl-3">
-                历史记录已加载。远端图片/视频 URL 可能已过期；如需重新合成，请重新生成。
+                历史记录已加载。成片是本地缓存的；分镜的远端图片/视频 URL 可能已过期。
               </div>
             )}
 

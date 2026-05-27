@@ -109,3 +109,59 @@ export function subscribeHistory(cb: () => void): () => void {
     historyListeners.delete(cb);
   };
 }
+
+// 合成后的最终 MP4 用 IndexedDB 存。blob 体积大（几 MB ~ 几十 MB），
+// localStorage 装不下；blob: URL 又只在当前页生命周期内有效，刷新就死。
+// 这里按 runId 持久化整段 blob，历史回看时重新 createObjectURL。
+const DB_NAME = "svf";
+const DB_VERSION = 1;
+const STORE_FINAL = "final-videos";
+
+function openDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE_FINAL)) {
+        db.createObjectStore(STORE_FINAL);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function saveFinalBlob(runId: string, blob: Blob): Promise<void> {
+  if (typeof window === "undefined") return;
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_FINAL, "readwrite");
+    tx.objectStore(STORE_FINAL).put(blob, runId);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+export async function loadFinalBlob(runId: string): Promise<Blob | null> {
+  if (typeof window === "undefined") return null;
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_FINAL, "readonly");
+    const req = tx.objectStore(STORE_FINAL).get(runId);
+    req.onsuccess = () => resolve((req.result as Blob | undefined) ?? null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function deleteFinalBlob(runId: string): Promise<void> {
+  if (typeof window === "undefined") return;
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_FINAL, "readwrite");
+    tx.objectStore(STORE_FINAL).delete(runId);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}

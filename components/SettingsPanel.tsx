@@ -81,72 +81,6 @@ export function SettingsPanel({ settings, onChange, disabled }: Props) {
 
   return (
     <div className="flex flex-col gap-6">
-      <section className="space-y-4">
-        <div className="space-y-2">
-          <Label htmlFor="apiKey">API Key</Label>
-          <div className="relative">
-            <KeyRound className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
-            <Input
-              id="apiKey"
-              type="password"
-              value={settings.apiKey}
-              onChange={(e) => update("apiKey", e.target.value)}
-              placeholder="sk-… 留空使用共享 key"
-              disabled={disabled}
-              className="pl-8 font-mono text-xs"
-            />
-          </div>
-          <p className="text-xs text-muted-foreground leading-relaxed">
-            <a
-              href="https://bailian.console.aliyun.com/?tab=model#/api-key"
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 text-foreground underline-offset-2 hover:underline"
-            >
-              阿里云百炼 <ExternalLink className="size-3" />
-            </a>
-            ，仅存浏览器 localStorage。
-          </p>
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor="provider">API 端点</Label>
-          <div className="relative">
-            <Server className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground z-10 pointer-events-none" />
-            <Select
-              value={
-                isProviderId(settings.provider) ? settings.provider : provider.id
-              }
-              onValueChange={(v) => {
-                if (isProviderId(v)) update("provider", v);
-              }}
-              disabled={disabled}
-            >
-              <SelectTrigger id="provider" className="pl-8">
-                <SelectValue>{provider.short}</SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                {PROVIDERS.map((p) => (
-                  <SelectItem key={p.id} value={p.id}>
-                    <div className="flex flex-col gap-0.5">
-                      <span>{p.label}</span>
-                      <span className="text-[10px] text-muted-foreground font-mono">
-                        {p.baseUrl}
-                      </span>
-                    </div>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <p className="text-xs text-muted-foreground leading-relaxed font-mono">
-            {provider.baseUrl}
-          </p>
-        </div>
-      </section>
-
-      <Separator />
-
       <section className="space-y-3">
         <div className="flex items-baseline justify-between">
           <Label>分镜数</Label>
@@ -252,6 +186,11 @@ export function SettingsPanel({ settings, onChange, disabled }: Props) {
               {overriddenCount} 项已改
             </span>
           )}
+          {!settings.apiKey && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded-sm border border-border text-muted-foreground">
+              共享 key
+            </span>
+          )}
           <span className="ml-auto text-xs text-muted-foreground">
             {modelsOpen ? "收起" : "展开"}
           </span>
@@ -259,6 +198,83 @@ export function SettingsPanel({ settings, onChange, disabled }: Props) {
 
         {modelsOpen && (
           <div id="model-config" className="space-y-4 pt-1">
+            <div className="space-y-2">
+              <Label htmlFor="apiKey">API Key</Label>
+              <div className="relative">
+                <KeyRound className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
+                <Input
+                  id="apiKey"
+                  type="password"
+                  value={settings.apiKey}
+                  onChange={(e) => update("apiKey", e.target.value)}
+                  placeholder="sk-… 留空使用共享 key"
+                  disabled={disabled}
+                  className="pl-8 font-mono text-xs"
+                />
+              </div>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                <a
+                  href="https://bailian.console.aliyun.com/?tab=model#/api-key"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-foreground underline-offset-2 hover:underline"
+                >
+                  阿里云百炼 <ExternalLink className="size-3" />
+                </a>
+                ，仅存浏览器 localStorage。
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="provider">API 端点</Label>
+              <div className="relative">
+                <Server className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground z-10 pointer-events-none" />
+                <Select
+                  value={
+                    isProviderId(settings.provider)
+                      ? settings.provider
+                      : provider.id
+                  }
+                  onValueChange={(v) => {
+                    if (!isProviderId(v) || v === settings.provider) return;
+                    // 切 provider 时清掉所有模型覆盖：不同 provider 模型命名规则不同
+                    // （比如 aliyun-edu 用 `qwen/...`，dashscope 用裸名），保留旧值
+                    // 会让 DashScope 返回 "Model not exist"。
+                    onChange({
+                      ...settings,
+                      provider: v,
+                      storyboardModel: "",
+                      imageModel: "",
+                      videoModel: "",
+                      ttsModel: "",
+                    });
+                  }}
+                  disabled={disabled}
+                >
+                  <SelectTrigger id="provider" className="pl-8">
+                    <SelectValue>{provider.short}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {PROVIDERS.map((p) => (
+                      <SelectItem key={p.id} value={p.id}>
+                        <div className="flex flex-col gap-0.5">
+                          <span>{p.label}</span>
+                          <span className="text-[10px] text-muted-foreground font-mono">
+                            {p.baseUrl}
+                          </span>
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <p className="text-xs text-muted-foreground leading-relaxed font-mono">
+                {provider.baseUrl}
+              </p>
+            </div>
+
+            <Separator />
+
             <p className="text-xs text-muted-foreground leading-relaxed">
               留空 = 用 {provider.short} 的默认模型。命名规则随 provider 不同，
               切换 provider 后留空字段会按对应默认值生效。

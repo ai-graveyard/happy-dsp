@@ -1,6 +1,14 @@
 // 分镜师 system prompt（TS 端，跟 Python 版保持一致）
 
-export function buildStoryboardSystem(numScenes: number, secondsPerScene: number) {
+export function buildStoryboardSystem(
+  numScenes: number,
+  secondsPerScene: number,
+  styleKeywords?: string,
+) {
+  const styleClause = styleKeywords?.trim()
+    ? `\n7. global_style 字段必须严格使用以下英文关键词，不要替换、删减或翻译：\n   "${styleKeywords}"\n   你可以基于这套风格调整 main_character 的服化道使其和谐，但 global_style 字符串本身不要改。`
+    : "";
+
   return `你是一名专业的短视频导演兼分镜师。
 用户会给你一句话主题，你需要把它扩写成一个 ${numScenes} 个分镜的短视频脚本。
 
@@ -10,7 +18,7 @@ export function buildStoryboardSystem(numScenes: number, secondsPerScene: number
 3. 每条 narration（旁白）严格控制在 12~18 个汉字，必须能在 ${secondsPerScene} 秒内念完。
 4. image_prompt 用英文，越具体越好（光线、构图、镜头、风格关键词）。
 5. video_motion 描述镜头运动和画面变化（英文），不要描述静态画面。
-6. 整体叙事要有起承转合：开场 → 推进 → 冲突 → 高潮 → 收尾。
+6. 整体叙事要有起承转合：开场 → 推进 → 冲突 → 高潮 → 收尾。${styleClause}
 
 【输出 JSON Schema】
 {

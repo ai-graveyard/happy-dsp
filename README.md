@@ -8,12 +8,12 @@
 
 ```
 用户输入主题
-    │  qwen3-max
+    │  qwen3-max（可选注入风格预设 → global_style）
     ▼
 分镜 JSON (N 个场景，含图像 prompt / 视频运动 / 旁白)
     │
     ├──→ qwen-image-plus  → 关键帧
-    │         │  wan2.7-i2v 或 happyhorse-1.0-i2v
+    │         │  wan2.5 / 2.6-flash / 2.7-i2v 或 happyhorse-1.0-i2v
     │         ▼
     │      视频片段
     │
@@ -28,13 +28,14 @@
 ## 功能特色
 
 - 🎨 **画风一致性**：global_style + main_character 自动拼接到每一帧
+- 🎭 **风格预设**：10 种预设（电影感 / 日漫 / 吉卜力 / 赛博朋克 / 水墨 / 3D 卡通 / 复古胶片 / 像素 / 水彩 / 自动），一键统一全片基调；非 auto 时强制覆盖 `global_style`，保证选什么出什么
 - ⚡ **全程并发**：图、视频、配音并行生成
 - 🔄 **SSE 实时进度**：每一帧/段视频/段配音一好就推回前端；顶部进度条按 关键帧 / 视频 / 配音 三轨展示 X/N，分镜卡片区分"排队 / 生成关键帧 / 生成视频"三态
 - 🎚️ **可调参数**：分镜数、单镜时长、横竖屏、TTS 音色
-- 🤖 **模型可换**：折叠的"模型配置"区列出每个功能用到的模型（分镜文本 / 文生图 / 图生视频 / TTS），留空即用所选 provider 的默认值
+- 🤖 **模型可换**：折叠的"模型配置"区列出每个功能用到的模型（分镜文本 / 文生图 / 图生视频 / TTS），留空即用所选 provider 的默认值；切换 provider 时会清掉自定义模型，避免命名规则不兼容导致 "Model not exist"
 - 🌐 **端点二选一**：API 端点不让随便填，只能在 `DashScope（阿里云百炼官方）` 或 `Aliyun EDU（教育版 model-router）` 间切换；切换后 pipeline 自动走对应路径（DashScope 用 `/services/aigc/*` + `X-DashScope-Async`，EDU 用 `/chat/completions` + `X-MR-Async`）
 - 🔑 **自带 / 共享 Key**：用户可自带 API Key（仅存浏览器 localStorage），也可只用部署方提供的共享 Key
-- 🕘 **localStorage 历史**：最近 20 条作品可一键复看
+- 🕘 **历史可复看**：最近 20 条作品的元数据存 localStorage，成片 mp4 存 IndexedDB，回看时直接放本地缓存的成片；老数据丢了也能基于已有分镜素材一键"重新合成"
 - 📥 **一键下载**：合成完直接下载 mp4
 
 ## 本地开发

@@ -324,16 +324,20 @@ async function submitVideoDashScope(
   imageUrl: string,
   signal?: AbortSignal,
 ): Promise<string> {
+  // DashScope 的 i2v 入参在 2.7 那一代换了：
+  //   wan2.5 / wan2.6 → input.img_url (旧)
+  //   wan2.7+         → input.media   (新)
+  // 同时也兜底其它 OpenAPI 风格的模型族（vidu/sora 等），保持 media 新格式。
+  const usesMedia = /^wan2\.[7-9]/.test(model) || /^wan[3-9]/.test(model);
+  const input = usesMedia
+    ? { prompt, media: [{ type: "first_frame", url: imageUrl }] }
+    : { prompt, img_url: imageUrl };
   const r = await requestWithRetry(
     `${client.provider.baseUrl}/services/aigc/video-generation/video-synthesis`,
     withSignal({
       method: "POST",
       headers: authHeaders(client.apiKey, { "X-DashScope-Async": "enable" }),
-      body: JSON.stringify({
-        model,
-        input: { prompt, img_url: imageUrl },
-        parameters: {},
-      }),
+      body: JSON.stringify({ model, input, parameters: {} }),
     }, signal),
   );
   const j = await r.json();

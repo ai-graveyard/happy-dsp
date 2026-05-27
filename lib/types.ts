@@ -84,7 +84,9 @@ export const PROVIDERS: readonly ProviderMeta[] = [
       ttsModel: "qwen3-tts-flash",
     },
     videoModels: [
-      { id: "wan2.5-i2v-preview", label: "Wan 2.5 i2v (preview)" },
+      { id: "wan2.5-i2v-preview", label: "Wan 2.5 i2v (preview, 默认)" },
+      { id: "wan2.6-i2v-flash", label: "Wan 2.6 i2v Flash (更快)" },
+      { id: "wan2.7-i2v", label: "Wan 2.7 i2v (最新)" },
     ],
   },
   {
@@ -120,6 +122,111 @@ export function getProviderMeta(id?: string | null): ProviderMeta {
   return id && isProviderId(id) ? PROVIDERS_BY_ID[id] : PROVIDERS_BY_ID[DEFAULT_PROVIDER];
 }
 
+// ============================================================================
+// 视觉风格预设 —— 让用户在生成前就能预知出片基调；"auto" 时交由模型自由发挥。
+// keywords 会直接作为 storyboard.global_style 注入图/视频 prompt。
+// ============================================================================
+
+export interface StylePreset {
+  id: string;
+  label: string;     // 中文短名
+  emoji: string;     // chip 上的视觉锚点
+  hint: string;      // 一句话中文描述，给 trigger / tooltip
+  keywords: string;  // 注入 global_style 的英文关键词；auto 留空
+}
+
+export const STYLE_PRESETS: readonly StylePreset[] = [
+  {
+    id: "auto",
+    label: "自动",
+    emoji: "✨",
+    hint: "让 AI 根据主题自由选择风格",
+    keywords: "",
+  },
+  {
+    id: "cinematic",
+    label: "电影感",
+    emoji: "🎬",
+    hint: "写实电影、浅景深、戏剧光",
+    keywords:
+      "cinematic photorealistic still, shallow depth of field, dramatic key lighting, anamorphic lens, 35mm film grain, 4k",
+  },
+  {
+    id: "anime",
+    label: "日漫",
+    emoji: "🌸",
+    hint: "日式动画、赛璐璐、明亮鲜艳",
+    keywords:
+      "modern Japanese anime style, cel-shaded, vivid saturated colors, clean line art, dynamic composition, soft rim light",
+  },
+  {
+    id: "ghibli",
+    label: "吉卜力",
+    emoji: "🌿",
+    hint: "吉卜力手绘、温柔治愈",
+    keywords:
+      "Studio Ghibli hand-drawn animation style, soft watercolor backgrounds, gentle pastel palette, whimsical, warm afternoon light",
+  },
+  {
+    id: "cyberpunk",
+    label: "赛博朋克",
+    emoji: "🌃",
+    hint: "霓虹、夜雨、未来都市",
+    keywords:
+      "cyberpunk neo-noir, neon signs, wet reflective streets, rain, holographic billboards, blade runner aesthetic, teal and magenta",
+  },
+  {
+    id: "ink",
+    label: "水墨",
+    emoji: "🖌️",
+    hint: "中国水墨、留白写意",
+    keywords:
+      "traditional Chinese ink wash painting, sumi-e brush strokes, monochrome with subtle color, lots of negative space, rice paper texture",
+  },
+  {
+    id: "pixar",
+    label: "3D 卡通",
+    emoji: "🧸",
+    hint: "皮克斯风、表情夸张、明亮",
+    keywords:
+      "Pixar style 3D animation, expressive characters, soft global illumination, vibrant colors, subsurface scattering, family friendly",
+  },
+  {
+    id: "retro-film",
+    label: "复古胶片",
+    emoji: "📼",
+    hint: "70s 胶片、暖调颗粒",
+    keywords:
+      "vintage 1970s film photography, warm Kodachrome color grading, visible film grain, soft halation, nostalgic mood",
+  },
+  {
+    id: "pixel",
+    label: "像素",
+    emoji: "👾",
+    hint: "16-bit 像素游戏画面",
+    keywords:
+      "16-bit pixel art, limited retro game palette, crisp dithering, side-scrolling composition, SNES aesthetic",
+  },
+  {
+    id: "watercolor",
+    label: "水彩",
+    emoji: "🎨",
+    hint: "水彩插画、柔和梦幻",
+    keywords:
+      "watercolor illustration, soft pastel washes, visible paper texture, dreamy, hand-painted, light bleeding edges",
+  },
+] as const;
+
+const STYLE_PRESETS_BY_ID = Object.fromEntries(
+  STYLE_PRESETS.map((s) => [s.id, s]),
+) as Record<string, StylePreset>;
+
+export const DEFAULT_STYLE: string = "auto";
+
+export function getStylePreset(id?: string | null): StylePreset {
+  return (id && STYLE_PRESETS_BY_ID[id]) || STYLE_PRESETS_BY_ID[DEFAULT_STYLE];
+}
+
 // 用户设置（存 localStorage）
 export interface UserSettings {
   apiKey: string;          // 用户自带 key；空表示用共享 key
@@ -132,6 +239,7 @@ export interface UserSettings {
   imageModel: string;      // 留空 = 用 provider.defaults.imageModel
   ttsModel: string;        // 留空 = 用 provider.defaults.ttsModel
   imageSize: string;       // 1280*720 / 720*1280
+  style: string;           // STYLE_PRESETS.id；"auto" 表示交给模型
 }
 
 export const DEFAULT_SETTINGS: UserSettings = {
@@ -145,6 +253,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   imageModel: "",
   ttsModel: "",
   imageSize: "1280*720",
+  style: DEFAULT_STYLE,
 };
 
 export const TTS_VOICES = ["Cherry", "Serena", "Ethan", "Chelsie"] as const;
