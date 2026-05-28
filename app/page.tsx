@@ -35,7 +35,9 @@ import { PlaceholderSceneCard, SceneCard } from "@/components/SceneCard";
 import { ProgressStrip } from "@/components/ProgressStrip";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { HistoryDrawer } from "@/components/HistoryDrawer";
+import { StoryboardEditor } from "@/components/StoryboardEditor";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
@@ -66,6 +68,7 @@ import {
   type GenerateEvent,
   type HistoryItem,
   type SceneAsset,
+  type StoryInput,
   type Storyboard,
 } from "@/lib/types";
 
@@ -85,10 +88,31 @@ const SUGGESTED_TOPICS = [
   "深海里有一座会唱歌的图书馆",
 ];
 
-type Phase = "idle" | "running" | "done" | "error";
+const PACING_OPTIONS: { id: "" | "direct" | "slow"; label: string; hint: string }[] = [
+  { id: "", label: "自动", hint: "交给模型自己拿捏" },
+  { id: "direct", label: "开门见山", hint: "第 1 镜就抛冲突，每镜推进" },
+  { id: "slow", label: "慢热铺垫", hint: "前 1-2 镜铺氛围，结尾留余韵" },
+];
+
+// 状态机：
+//   idle            → 在输入主题，可以点 "拆分镜"
+//   loading-sb      → POST /api/storyboard 进行中
+//   editing-sb      → 已拿到分镜，正在编辑确认
+//   generating      → POST /api/generate-assets SSE 进行中
+//   done            → 全部完成（含合成）或从历史加载
+//   error           → 任意阶段失败
+type Phase =
+  | "idle"
+  | "loading-sb"
+  | "editing-sb"
+  | "generating"
+  | "done"
+  | "error";
 
 export default function HomePage() {
   const [topic, setTopic] = useState("");
+  const [character, setCharacter] = useState("");
+  const [pacing, setPacing] = useState<"" | "direct" | "slow">("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [logs, setLogs] = useState<string[]>([]);
   const [storyboard, setStoryboard] = useState<Storyboard | null>(null);
@@ -98,20 +122,17 @@ export default function HomePage() {
   const [finalUrl, setFinalUrl] = useState<string | null>(null);
   const [merging, setMerging] = useState(false);
   const [loadedFromHistory, setLoadedFromHistory] = useState(false);
-  // 从历史加载时，去 IndexedDB 取回成片的状态机：
-  // null = 没在加载历史；"loading" = 正在取；"missing" = 取不到（老数据 / 已删）
   const [historyFinalState, setHistoryFinalState] = useState<
     null | "loading" | "missing"
   >(null);
-  // 跟踪每个分镜是否已提交关键帧请求；用于区分 "排队中" vs "生成中"
   const [framesSubmitted, setFramesSubmitted] = useState<Record<number, true>>({});
-  // 用于显示运行时长，每 1s tick 一次（startedAt 为 null 时 elapsed 显示 0）
+  // PR B: 主角立绘 loading / error 状态。立绘 URL 本身写在 storyboard.characterImageUrl
+  const [characterLoading, setCharacterLoading] = useState(false);
+  const [characterError, setCharacterError] = useState<string | undefined>();
+  const characterAbortRef = useRef<AbortController | null>(null);
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [now, setNow] = useState<number>(0);
 
-  // loadSettings / loadHistory already return server-safe defaults when
-  // window is undefined — passing them as both snapshots ensures a single
-  // stable reference and avoids hydration mismatches.
   const settings = useSyncExternalStore(
     subscribeSettings,
     loadSettings,
@@ -129,7 +150,6 @@ export default function HomePage() {
   const runIdRef = useRef<string | null>(null);
   const finalUrlRef = useRef<string | null>(null);
 
-  // 跟踪当前 blob URL，组件卸载时释放
   useEffect(() => {
     finalUrlRef.current = finalUrl;
   }, [finalUrl]);
@@ -139,13 +159,18 @@ export default function HomePage() {
     };
   }, []);
 
-  // 1s 心跳：仅在 running 或 merging 时跑，更新 elapsed 显示
+  // 1s 心跳：在 loading-sb / generating / merging 时更新 elapsed 显示
   useEffect(() => {
-    if (phase !== "running" && !merging) return;
+    const active =
+      phase === "loading-sb" || phase === "generating" || merging;
+    if (!active) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [phase, merging]);
 
+  // ============================================================================
+  // SSE 事件处理（只在 generating 阶段会收到）
+  // ============================================================================
   const handleEvent = useCallback((ev: GenerateEvent) => {
     switch (ev.type) {
       case "start":
@@ -153,14 +178,6 @@ export default function HomePage() {
         break;
       case "log":
         setLogs((ls) => [...ls.slice(-19), ev.message]);
-        break;
-      case "storyboard":
-        setStoryboard(ev.data);
-        setAssets(
-          Object.fromEntries(
-            ev.data.scenes.map((s) => [s.id, { sceneId: s.id }]),
-          ),
-        );
         break;
       case "frame_submitted":
         setFramesSubmitted((m) => ({ ...m, [ev.sceneId]: true }));
@@ -192,15 +209,104 @@ export default function HomePage() {
         }
         break;
       case "complete":
-        // 不要覆盖 error 状态：如果整体已失败，保持 error
         setPhase((p) => (p === "error" ? p : "done"));
         break;
     }
   }, []);
 
-  async function startGeneration() {
-    if (!topic.trim() || phase === "running") return;
-    setPhase("running");
+  function buildStoryInput(): StoryInput {
+    return {
+      topic: topic.trim(),
+      character: character.trim() || undefined,
+      pacing: pacing || undefined,
+    };
+  }
+
+  // ============================================================================
+  // Step 1.5 (PR B): 主角立绘（POST /api/character）—— 并行
+  // 取消任何在跑的立绘任务，按 storyboard.main_character 重新出图。
+  // ============================================================================
+  const fetchCharacter = useCallback(
+    async (sb: Storyboard) => {
+      characterAbortRef.current?.abort();
+      const ctrl = new AbortController();
+      characterAbortRef.current = ctrl;
+      setCharacterLoading(true);
+      setCharacterError(undefined);
+      try {
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
+        if (settings.apiKey) headers["x-mr-key"] = settings.apiKey;
+        const res = await fetch("/api/character", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ storyboard: sb, settings }),
+          signal: ctrl.signal,
+        });
+        if (!res.ok) {
+          const j = await res.json().catch(() => ({}));
+          throw new Error(j.error || `HTTP ${res.status}`);
+        }
+        const { url } = (await res.json()) as { url: string };
+        // 竞态守卫：用户在立绘出来前点了 "重抽分镜"，会换掉 storyboard 引用
+        setStoryboard((cur) => (cur ? { ...cur, characterImageUrl: url } : cur));
+      } catch (err) {
+        if ((err as Error).name === "AbortError") return;
+        setCharacterError((err as Error).message);
+      } finally {
+        if (characterAbortRef.current === ctrl) setCharacterLoading(false);
+      }
+    },
+    [settings],
+  );
+
+  // ============================================================================
+  // Step 1: 拆分镜（POST /api/storyboard）
+  // ============================================================================
+  const fetchStoryboard = useCallback(
+    async (input: StoryInput) => {
+      const ctrl = new AbortController();
+      abortRef.current = ctrl;
+      try {
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
+        if (settings.apiKey) headers["x-mr-key"] = settings.apiKey;
+        const res = await fetch("/api/storyboard", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ input, settings }),
+          signal: ctrl.signal,
+        });
+        if (!res.ok) {
+          const j = await res.json().catch(() => ({}));
+          throw new Error(j.error || `HTTP ${res.status}`);
+        }
+        const { storyboard: sb } = (await res.json()) as { storyboard: Storyboard };
+        setStoryboard(sb);
+        setPhase("editing-sb");
+        // 拆完分镜立刻并行出立绘；不 await，让用户先看到分镜
+        fetchCharacter(sb);
+      } catch (err) {
+        if ((err as Error).name !== "AbortError") {
+          setError((err as Error).message);
+          setPhase("error");
+        }
+      }
+    },
+    [settings, fetchCharacter],
+  );
+
+  // 用户在编辑器里点 "重抽立绘"
+  function regenerateCharacter() {
+    if (!storyboard) return;
+    fetchCharacter(storyboard);
+  }
+
+  async function startStoryboard() {
+    if (!topic.trim() || phase === "loading-sb" || phase === "generating") return;
+    setPhase("loading-sb");
     setLogs([]);
     setStoryboard(null);
     setAssets({});
@@ -211,6 +317,40 @@ export default function HomePage() {
     setFinalUrl(null);
     setLoadedFromHistory(false);
     setHistoryFinalState(null);
+    // 取消任何在跑的立绘任务，重置立绘状态
+    characterAbortRef.current?.abort();
+    setCharacterLoading(false);
+    setCharacterError(undefined);
+    setStartedAt(Date.now());
+    setNow(Date.now());
+
+    await fetchStoryboard(buildStoryInput());
+  }
+
+  async function regenerateStoryboard() {
+    if (!storyboard) return;
+    setPhase("loading-sb");
+    characterAbortRef.current?.abort();
+    setCharacterLoading(false);
+    setCharacterError(undefined);
+    setStartedAt(Date.now());
+    setNow(Date.now());
+    await fetchStoryboard(buildStoryInput());
+  }
+
+  // ============================================================================
+  // Step 2-4: 资源生成（POST /api/generate-assets，SSE）
+  // ============================================================================
+  async function startAssets() {
+    if (!storyboard) return;
+    setPhase("generating");
+    setLogs([]);
+    setAssets(
+      Object.fromEntries(storyboard.scenes.map((s) => [s.id, { sceneId: s.id }])),
+    );
+    setSceneErrors({});
+    setFramesSubmitted({});
+    setError(null);
     setStartedAt(Date.now());
     setNow(Date.now());
 
@@ -223,10 +363,10 @@ export default function HomePage() {
       };
       if (settings.apiKey) headers["x-mr-key"] = settings.apiKey;
 
-      const res = await fetch("/api/generate", {
+      const res = await fetch("/api/generate-assets", {
         method: "POST",
         headers,
-        body: JSON.stringify({ topic: topic.trim(), settings }),
+        body: JSON.stringify({ storyboard, settings }),
         signal: ctrl.signal,
       });
 
@@ -268,13 +408,20 @@ export default function HomePage() {
 
   function cancel() {
     abortRef.current?.abort();
+    characterAbortRef.current?.abort();
+    setCharacterLoading(false);
     setPhase("idle");
   }
 
-  // 真正干合成活的函数：调 /api/merge → blob → IndexedDB → 屏幕。
-  // 自动合成和"重新合成"按钮都走这里。
-  // pushHistoryItem=true 时把这次合成写进历史索引（首次生成路径）；
-  // 从历史回看时重新合成，索引已经在了，只需刷新 blob 缓存。
+  function cancelEditing() {
+    characterAbortRef.current?.abort();
+    setCharacterLoading(false);
+    setCharacterError(undefined);
+    setStoryboard(null);
+    setPhase("idle");
+  }
+
+  // 自动合成
   const runMerge = useCallback(
     async (pushHistoryItem: boolean) => {
       if (!storyboard) return;
@@ -295,16 +442,13 @@ export default function HomePage() {
           throw new Error(j.error || `merge failed: ${res.status}`);
         }
         const blob = await res.blob();
-        // 竞态守卫：用户在合成期间又切到了别的历史项，丢弃这次结果
         if (runIdRef.current !== runId) return;
         if (finalUrlRef.current) URL.revokeObjectURL(finalUrlRef.current);
         setFinalUrl(URL.createObjectURL(blob));
         setHistoryFinalState(null);
 
         if (runId) {
-          await saveFinalBlob(runId, blob).catch(() => {
-            // 配额满 / 隐私模式 / 等等。失败也不影响本次播放，只是回看时取不到
-          });
+          await saveFinalBlob(runId, blob).catch(() => {});
           if (pushHistoryItem) {
             const item: HistoryItem = {
               runId,
@@ -326,11 +470,10 @@ export default function HomePage() {
     [storyboard, assets, topic],
   );
 
-  // 所有分镜齐了 → 自动 merge（从历史加载的不重新合成，避免远端 URL 已过期）
   useEffect(() => {
     if (phase !== "done" || !storyboard || loadedFromHistory) return;
     const allSettled = storyboard.scenes.every((s) => {
-      if (sceneErrors[s.id]) return true; // 失败的分镜跳过
+      if (sceneErrors[s.id]) return true;
       const a = assets[s.id];
       return a?.videoUrl && a?.audioUrl;
     });
@@ -345,6 +488,8 @@ export default function HomePage() {
 
   function loadFromHistory(item: HistoryItem) {
     setTopic(item.topic);
+    setCharacter("");
+    setPacing("");
     setStoryboard(item.storyboard);
     setAssets(Object.fromEntries(item.assets.map((a) => [a.sceneId, a])));
     setSceneErrors({});
@@ -354,11 +499,13 @@ export default function HomePage() {
     setFinalUrl(null);
     setError(null);
     setLoadedFromHistory(true);
+    // 取消任何在跑的立绘任务（如果用户在编辑分镜时切到历史）
+    characterAbortRef.current?.abort();
+    setCharacterLoading(false);
+    setCharacterError(undefined);
     runIdRef.current = item.runId;
     setHistoryFinalState("loading");
 
-    // 异步取回 IndexedDB 里缓存的成片。
-    // 用 runIdRef 做竞态守卫：快速切换历史项时只兑现最后一次点的那条。
     loadFinalBlob(item.runId)
       .then((blob) => {
         if (runIdRef.current !== item.runId) return;
@@ -382,12 +529,14 @@ export default function HomePage() {
 
   const orderedScenes = storyboard?.scenes ?? [];
   const totalSeconds = settings.numScenes * settings.secondsPerScene;
-  const isRunning = phase === "running";
+  const isLoadingSb = phase === "loading-sb";
+  const isEditingSb = phase === "editing-sb";
+  const isGenerating = phase === "generating";
+  // 输入区是否禁用 —— 在拆分镜/编辑分镜/生成时都不允许改主题
+  const inputsDisabled = isLoadingSb || isEditingSb || isGenerating;
   const erroredSceneCount = orderedScenes.filter(
     (s) => sceneErrors[s.id],
   ).length;
-  // The active orientation: prefer what the storyboard was actually generated
-  // with (so history loads stay correct), else the live settings selection.
   const activeImageSize = storyboard?.imageSize ?? settings.imageSize;
   const isPortrait = activeImageSize === "720*1280";
   const previewAspectClass = isPortrait ? "aspect-[9/16]" : "aspect-video";
@@ -397,7 +546,6 @@ export default function HomePage() {
     orderedScenes.length > 0 &&
     erroredSceneCount === orderedScenes.length;
 
-  // 进度统计 —— 给 ProgressStrip 用
   const totalScenes = orderedScenes.length;
   const frameCount = orderedScenes.filter((s) => assets[s.id]?.imageUrl).length;
   const videoCount = orderedScenes.filter((s) => assets[s.id]?.videoUrl).length;
@@ -405,11 +553,11 @@ export default function HomePage() {
   const elapsedSec = startedAt ? (now - startedAt) / 1000 : 0;
   const progressPhase: "splitting" | "producing" | "merging" | null = merging
     ? "merging"
-    : isRunning
-      ? storyboard
-        ? "producing"
-        : "splitting"
-      : null;
+    : isGenerating
+      ? "producing"
+      : isLoadingSb
+        ? "splitting"
+        : null;
   const latestLog = logs.length > 0 ? logs[logs.length - 1] : undefined;
 
   return (
@@ -418,7 +566,7 @@ export default function HomePage() {
       <header className="sticky top-0 z-30 border-b border-border bg-background/90 backdrop-blur">
         <div className="mx-auto max-w-[1400px] px-4 sm:px-6 h-14 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <Clapperboard className="size-5" strokeWidth={1.5} />
+            <Clapperboard className="size-5 text-primary" strokeWidth={1.5} />
             <div className="flex items-baseline gap-3">
               <h1 className="text-sm font-semibold tracking-tight">
                 短视频工厂
@@ -488,7 +636,7 @@ export default function HomePage() {
                 <SettingsPanel
                   settings={settings}
                   onChange={saveSettings}
-                  disabled={isRunning}
+                  disabled={inputsDisabled}
                 />
               </div>
             </div>
@@ -532,7 +680,7 @@ export default function HomePage() {
                   id="topic"
                   value={topic}
                   onChange={(e) => setTopic(e.target.value)}
-                  disabled={isRunning}
+                  disabled={inputsDisabled}
                   placeholder="例：一只猫侦探在赛博朋克城市寻找走失的金鱼…"
                   rows={3}
                   className="resize-none"
@@ -543,12 +691,59 @@ export default function HomePage() {
                     <button
                       key={s}
                       onClick={() => setTopic(s)}
-                      disabled={isRunning}
-                      className="text-xs px-2.5 py-1 rounded-sm border border-border text-muted-foreground hover:border-foreground/40 hover:text-foreground transition disabled:opacity-50"
+                      disabled={inputsDisabled}
+                      className="text-xs h-9 px-3 rounded-sm border border-border text-muted-foreground hover:border-primary/40 hover:text-foreground transition disabled:opacity-50"
                     >
                       {s}
                     </button>
                   ))}
+                </div>
+
+                {/* 主角描述 + 节奏 —— 可选字段 */}
+                <div className="grid gap-3 sm:grid-cols-2 pt-1">
+                  <div className="space-y-1.5">
+                    <label
+                      htmlFor="character"
+                      className="block text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground"
+                    >
+                      主角描述 <span className="normal-case opacity-60">(可选)</span>
+                    </label>
+                    <Input
+                      id="character"
+                      value={character}
+                      onChange={(e) => setCharacter(e.target.value)}
+                      disabled={inputsDisabled}
+                      placeholder="例：橘色虎斑猫，戴侦探帽和风衣"
+                      className="text-xs"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <div className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+                      节奏 <span className="normal-case opacity-60">(可选)</span>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {PACING_OPTIONS.map((opt) => {
+                        const active = pacing === opt.id;
+                        return (
+                          <button
+                            key={opt.id || "auto"}
+                            onClick={() => setPacing(opt.id)}
+                            disabled={inputsDisabled}
+                            title={opt.hint}
+                            aria-pressed={active}
+                            className={cn(
+                              "text-xs h-9 px-3 rounded-sm border transition disabled:opacity-50",
+                              active
+                                ? "border-primary text-primary bg-primary/10"
+                                : "border-border text-muted-foreground hover:border-primary/40 hover:text-foreground",
+                            )}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 </div>
 
                 <div className="space-y-2 pt-1">
@@ -569,14 +764,14 @@ export default function HomePage() {
                           onClick={() =>
                             saveSettings({ ...settings, style: s.id })
                           }
-                          disabled={isRunning}
+                          disabled={inputsDisabled}
                           title={s.hint}
                           aria-pressed={active}
                           className={cn(
-                            "text-xs px-2.5 py-1 rounded-sm border transition disabled:opacity-50 inline-flex items-center gap-1",
+                            "text-xs h-9 px-3 rounded-sm border transition disabled:opacity-50 inline-flex items-center gap-1",
                             active
-                              ? "border-foreground text-foreground bg-foreground/5"
-                              : "border-border text-muted-foreground hover:border-foreground/40 hover:text-foreground",
+                              ? "border-primary text-primary bg-primary/10"
+                              : "border-border text-muted-foreground hover:border-primary/40 hover:text-foreground",
                           )}
                         >
                           <span aria-hidden="true">{s.emoji}</span>
@@ -592,7 +787,14 @@ export default function HomePage() {
 
               <div className="p-3 flex items-center justify-between">
                 <div className="px-2 text-xs text-muted-foreground inline-flex items-center gap-1.5">
-                  {isRunning ? (
+                  {isLoadingSb ? (
+                    <>
+                      <Loader2 className="size-3 animate-spin" />
+                      拆分镜中…
+                    </>
+                  ) : isEditingSb ? (
+                    <>等你确认分镜 ↓</>
+                  ) : isGenerating ? (
                     <>
                       <Loader2 className="size-3 animate-spin" />
                       生成中… 请勿关闭页面
@@ -606,21 +808,27 @@ export default function HomePage() {
                     "准备就绪"
                   )}
                 </div>
-                {isRunning ? (
+                {isLoadingSb || isGenerating ? (
                   <Button variant="outline" onClick={cancel}>
                     <Square className="size-3.5" fill="currentColor" />
                     取消
                   </Button>
-                ) : (
-                  <Button onClick={startGeneration} disabled={!topic.trim()}>
+                ) : isEditingSb ? (
+                  // 编辑分镜时输入区禁用，操作转到下面 editor 上
+                  <Button disabled>
                     <Sparkles className="size-4" />
-                    开始生成
+                    在下方编辑分镜
+                  </Button>
+                ) : (
+                  <Button onClick={startStoryboard} disabled={!topic.trim()}>
+                    <Sparkles className="size-4" />
+                    拆分镜
                   </Button>
                 )}
               </div>
             </section>
 
-            {/* 顶部全局进度条 —— 拆分镜 / 生成中 / 合成中 */}
+            {/* 顶部全局进度条 */}
             {progressPhase && (
               <ProgressStrip
                 phase={progressPhase}
@@ -643,7 +851,32 @@ export default function HomePage() {
               </section>
             )}
 
-            {storyboard && (
+            {/* 分镜确认编辑器 —— 仅在 editing-sb 阶段显示 */}
+            {isEditingSb && storyboard && (
+              <StoryboardEditor
+                storyboard={storyboard}
+                onChange={setStoryboard}
+                onConfirm={startAssets}
+                onCancel={cancelEditing}
+                onRegenerate={regenerateStoryboard}
+                regenerating={false}
+                characterLoading={characterLoading}
+                characterError={characterError}
+                onRegenerateCharacter={regenerateCharacter}
+                supportsRefImage={getProviderMeta(settings.provider).supportsReferenceImage}
+              />
+            )}
+
+            {/* 分镜阶段重抽时的占位（loading-sb 阶段且已经有过 storyboard 但被清掉了）*/}
+            {isLoadingSb && (
+              <section className="rounded-md border border-dashed border-border bg-card/30 p-6 text-sm text-muted-foreground inline-flex items-center gap-2">
+                <Loader2 className="size-4 animate-spin" />
+                正在拆分镜，请稍候…
+              </section>
+            )}
+
+            {/* 生成 / 完成阶段：场景卡片网格 */}
+            {(isGenerating || phase === "done" || phase === "error") && storyboard && (
               <section className="space-y-4">
                 <div className="flex items-end justify-between gap-3 flex-wrap">
                   <div>
@@ -652,7 +885,7 @@ export default function HomePage() {
                     </div>
                     <h2 className="text-base font-semibold flex items-center gap-3">
                       {storyboard.title}
-                      {isRunning && (
+                      {isGenerating && (
                         <Badge variant="outline" className="normal-case">
                           <Loader2 className="size-3 animate-spin" />
                           生成中
@@ -681,7 +914,7 @@ export default function HomePage() {
                       errorMessage={sceneErrors[s.id]}
                       aspectClass={previewAspectClass}
                       frameSubmitted={!!framesSubmitted[s.id]}
-                      audioPending={isRunning && !assets[s.id]?.audioUrl}
+                      audioPending={isGenerating && !assets[s.id]?.audioUrl}
                     />
                   ))}
                 </div>
@@ -764,7 +997,6 @@ export default function HomePage() {
                   </div>
                 ) : merging ? (
                   <div className="rounded-md border border-border bg-card overflow-hidden">
-                    {/* indeterminate 进度条 */}
                     <div className="relative h-1 overflow-hidden bg-muted">
                       <div className="absolute inset-y-0 left-0 w-1/3 bg-foreground rounded-full animate-indeterminate" />
                     </div>
@@ -795,7 +1027,8 @@ export default function HomePage() {
               </div>
             )}
 
-            {!storyboard && (
+            {/* 空状态占位 —— 还没开始拆分镜 */}
+            {!storyboard && !isLoadingSb && (
               <>
                 <section className="space-y-4">
                   <div>
@@ -803,7 +1036,7 @@ export default function HomePage() {
                       02 · 分镜
                     </div>
                     <h2 className="text-base font-semibold text-muted-foreground">
-                      {isRunning ? "正在拆分镜…" : "分镜将在此显示"}
+                      分镜将在此显示（你可以确认/编辑后再生成视频）
                     </h2>
                   </div>
                   <div
@@ -819,7 +1052,7 @@ export default function HomePage() {
                         key={i}
                         index={i + 1}
                         aspectClass={previewAspectClass}
-                        pulse={isRunning}
+                        pulse={false}
                       />
                     ))}
                   </div>
@@ -900,7 +1133,7 @@ export default function HomePage() {
             <SettingsPanel
               settings={settings}
               onChange={saveSettings}
-              disabled={isRunning}
+              disabled={inputsDisabled}
             />
           </div>
         </SheetContent>

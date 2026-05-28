@@ -141,13 +141,43 @@ export async function submitImage(
     : submitImageAliyunEdu(client, model, prompt, size, signal);
 }
 
+// PR B: 图编辑（带 reference 图）—— 把主角立绘融入新场景的 prompt 里。
+// 跟 submitImage 一样异步返回 task_id，poll 完拿 URL。
+// shape 参考 DashScope qwen-image-edit-plus 文档：
+//   POST /services/aigc/multimodal-generation/generation  (X-DashScope-Async: enable)
+//   body: { model, input: { messages: [{ role: "user", content: [{image}, {text}] }] }, parameters: { size, n } }
+// EDU model-router 端点路径未公开，先按惯例猜 /images/edits（OpenAI 风格路径
+// + DashScope 风格 body）；失败由调用方降级到无 ref 的 submitImage。
+export async function submitImageEdit(
+  client: ApiClient,
+  model: string,
+  prompt: string,
+  refImageUrl: string,
+  size = "1280*720",
+  signal?: AbortSignal,
+): Promise<string> {
+  return client.provider.id === "dashscope"
+    ? submitImageEditDashScope(client, model, prompt, refImageUrl, size, signal)
+    : submitImageEditAliyunEdu(client, model, prompt, refImageUrl, size, signal);
+}
+
 export async function waitImage(
   client: ApiClient,
   taskId: string,
   signal?: AbortSignal,
 ): Promise<string> {
   const out = await pollTask(client, taskId, 3_000, 300_000, `image#${taskId}`, signal);
-  return (out.results?.[0]?.url ?? "") as string;
+  // qwen-image-edit / wan-image-edit 异步任务返回的格式可能是
+  //   results: [{ url }]               （跟 text2image 一致）
+  // 或者
+  //   choices: [{ message: { content: [{ image: url }] } }]   （multimodal 风格）
+  // 兜底两种都尝试一遍。
+  const fromResults = out.results?.[0]?.url;
+  if (fromResults) return fromResults;
+  const choices = (out as { choices?: Array<{ message?: { content?: Array<{ image?: string }> } }> }).choices;
+  const fromChoices = choices?.[0]?.message?.content?.find((c) => c.image)?.image;
+  if (fromChoices) return fromChoices;
+  return "";
 }
 
 export async function submitVideo(
@@ -216,6 +246,38 @@ async function submitImageAliyunEdu(
       model,
       input: { prompt },
       parameters: { size, n: 1, prompt_extend: true },
+    }),
+  }, signal));
+  const j = await r.json();
+  return j.output.task_id as string;
+}
+
+async function submitImageEditAliyunEdu(
+  client: ApiClient,
+  model: string,
+  prompt: string,
+  refImageUrl: string,
+  size: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  // EDU 端点路径未公开；按 model-router 惯例尝试 /images/edits
+  const r = await requestWithRetry(`${client.provider.baseUrl}/images/edits`, withSignal({
+    method: "POST",
+    headers: authHeaders(client.apiKey, { "X-MR-Async": "true" }),
+    body: JSON.stringify({
+      model,
+      input: {
+        messages: [
+          {
+            role: "user",
+            content: [
+              { image: refImageUrl },
+              { text: prompt },
+            ],
+          },
+        ],
+      },
+      parameters: { size, n: 1 },
     }),
   }, signal));
   const j = await r.json();
@@ -310,6 +372,42 @@ async function submitImageDashScope(
         model,
         input: { prompt },
         parameters: { size, n: 1, prompt_extend: true },
+      }),
+    }, signal),
+  );
+  const j = await r.json();
+  return j.output.task_id as string;
+}
+
+async function submitImageEditDashScope(
+  client: ApiClient,
+  model: string,
+  prompt: string,
+  refImageUrl: string,
+  size: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  // qwen-image-edit-plus / wan2.7-image-pro 走 multimodal-generation/generation
+  // 异步接口；body 用 messages.content 数组，里面塞 image + text。
+  const r = await requestWithRetry(
+    `${client.provider.baseUrl}/services/aigc/multimodal-generation/generation`,
+    withSignal({
+      method: "POST",
+      headers: authHeaders(client.apiKey, { "X-DashScope-Async": "enable" }),
+      body: JSON.stringify({
+        model,
+        input: {
+          messages: [
+            {
+              role: "user",
+              content: [
+                { image: refImageUrl },
+                { text: prompt },
+              ],
+            },
+          ],
+        },
+        parameters: { size, n: 1 },
       }),
     }, signal),
   );

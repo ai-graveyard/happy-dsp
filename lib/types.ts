@@ -16,6 +16,9 @@ export interface Storyboard {
   // Stamped by the server pipeline so the UI can render previews with the
   // right aspect ratio even after the user changes settings or loads history.
   imageSize?: string;
+  // PR B: 主角立绘 URL（由 /api/character 生成；用户在编辑器里确认后随 storyboard
+  // 一起传给 /api/generate-assets，作为每个 scene 图像生成的 reference image）。
+  characterImageUrl?: string;
 }
 
 export interface SceneAsset {
@@ -25,10 +28,11 @@ export interface SceneAsset {
   audioUrl?: string;
 }
 
-// SSE 事件 —— 全部都是 application/json 行，前端按 event.type 分发
+// SSE 事件 —— 全部都是 application/json 行，前端按 event.type 分发。
+// 注意：拆架构后 storyboard 不再由 SSE emit（改走 /api/storyboard 一次性返回），
+// generate-assets 的 SSE 流从 start 开始，直接进入 frame/video/audio。
 export type GenerateEvent =
-  | { type: "start"; topic: string; runId: string }
-  | { type: "storyboard"; data: Storyboard }
+  | { type: "start"; runId: string }
   | { type: "frame_submitted"; sceneId: number }
   | { type: "frame_done"; sceneId: number; imageUrl: string }
   | { type: "video_submitted"; sceneId: number }
@@ -37,6 +41,13 @@ export type GenerateEvent =
   | { type: "log"; message: string }
   | { type: "error"; message: string; sceneId?: number }
   | { type: "complete"; assets: SceneAsset[] };
+
+// 用户输入（首页表单）—— 在 storyboard 生成时使用，不持久化
+export interface StoryInput {
+  topic: string;                      // 一句话故事 (必填)
+  character?: string;                 // 主角描述 (可选，注入 main_character)
+  pacing?: "direct" | "slow";         // 节奏 (可选，影响 narration 节奏)
+}
 
 // 历史记录（存 localStorage）
 export interface HistoryItem {
@@ -63,12 +74,15 @@ export interface ProviderMeta {
   baseUrl: string;
   defaults: {
     storyboardModel: string;
-    imageModel: string;
+    imageModel: string;           // 文生图（无 ref）—— 用于主角立绘
+    editImageModel: string;       // 图编辑（带 ref）—— 用于带主角立绘 reference 的场景帧
     videoModel: string;
     ttsModel: string;
   };
   // 该 provider 推荐的视频模型 curated 列表（设置面板里下拉）
   videoModels: readonly { id: string; label: string }[];
+  // PR B: 是否支持把 ref 图注入场景帧。EDU 端点目前路径未公开，先 false。
+  supportsReferenceImage: boolean;
 }
 
 export const PROVIDERS: readonly ProviderMeta[] = [
@@ -80,6 +94,7 @@ export const PROVIDERS: readonly ProviderMeta[] = [
     defaults: {
       storyboardModel: "qwen-max",
       imageModel: "wan2.5-t2i-preview",
+      editImageModel: "qwen-image-edit-plus",
       videoModel: "wan2.5-i2v-preview",
       ttsModel: "qwen3-tts-flash",
     },
@@ -88,6 +103,7 @@ export const PROVIDERS: readonly ProviderMeta[] = [
       { id: "wan2.6-i2v-flash", label: "Wan 2.6 i2v Flash (更快)" },
       { id: "wan2.7-i2v", label: "Wan 2.7 i2v (最新)" },
     ],
+    supportsReferenceImage: true,
   },
   {
     id: "aliyun-edu",
@@ -97,6 +113,7 @@ export const PROVIDERS: readonly ProviderMeta[] = [
     defaults: {
       storyboardModel: "qwen/qwen3-max",
       imageModel: "qwen/qwen-image-plus",
+      editImageModel: "qwen/qwen-image-edit-plus",
       videoModel: "qwen/happyhorse-1.0-i2v",
       ttsModel: "qwen/qwen3-tts-instruct-flash",
     },
@@ -104,6 +121,9 @@ export const PROVIDERS: readonly ProviderMeta[] = [
       { id: "qwen/happyhorse-1.0-i2v", label: "HappyHorse 1.0 (二次元/夸张, 默认)" },
       { id: "qwen/wan2.7-i2v", label: "Wan 2.7 (写实/电影感)" },
     ],
+    // EDU 的 image-edit endpoint 路径在公开文档里查不到，先开启试一下；
+    // 失败的话 pipeline 会 fallback 到无 ref 的 submitImage（见 generateAssets）。
+    supportsReferenceImage: true,
   },
 ] as const;
 
@@ -237,6 +257,7 @@ export interface UserSettings {
   videoModel: string;      // 留空 = 用 provider.defaults.videoModel
   storyboardModel: string; // 留空 = 用 provider.defaults.storyboardModel
   imageModel: string;      // 留空 = 用 provider.defaults.imageModel
+  editImageModel: string;  // 留空 = 用 provider.defaults.editImageModel（带 ref 的场景帧）
   ttsModel: string;        // 留空 = 用 provider.defaults.ttsModel
   imageSize: string;       // 1280*720 / 720*1280
   style: string;           // STYLE_PRESETS.id；"auto" 表示交给模型
@@ -251,6 +272,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   videoModel: "",
   storyboardModel: "",
   imageModel: "",
+  editImageModel: "",
   ttsModel: "",
   imageSize: "1280*720",
   style: DEFAULT_STYLE,

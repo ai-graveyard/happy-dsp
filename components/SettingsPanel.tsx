@@ -32,7 +32,7 @@ interface Props {
 
 // 模型字段元信息 —— 实际默认值随 provider 走
 interface ModelField {
-  key: "storyboardModel" | "imageModel" | "videoModel" | "ttsModel";
+  key: "storyboardModel" | "imageModel" | "editImageModel" | "videoModel" | "ttsModel";
   label: string;
   purpose: string;
   defaultKey: keyof ProviderMeta["defaults"];
@@ -48,8 +48,14 @@ const MODEL_FIELDS: ModelField[] = [
   {
     key: "imageModel",
     label: "文生图",
-    purpose: "生成每个分镜的关键帧",
+    purpose: "生成主角立绘、无参考帧",
     defaultKey: "imageModel",
+  },
+  {
+    key: "editImageModel",
+    label: "图像编辑（带参考图）",
+    purpose: "把主角立绘融入每个场景帧",
+    defaultKey: "editImageModel",
   },
   {
     key: "videoModel",
@@ -245,6 +251,7 @@ export function SettingsPanel({ settings, onChange, disabled }: Props) {
                       provider: v,
                       storyboardModel: "",
                       imageModel: "",
+                      editImageModel: "",
                       videoModel: "",
                       ttsModel: "",
                     });

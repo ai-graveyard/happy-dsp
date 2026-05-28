@@ -1,31 +1,47 @@
-// POST /api/generate
-// 入参: { topic: string, settings: UserSettings }（settings.provider 决定端点预设）
-// header: x-mr-key（可选，用户自带 key；缺则用 env.SHARED_MR_KEY）
-// 出参: Server-Sent Events stream of GenerateEvent
+// POST /api/generate-assets
+// 入参: { storyboard: Storyboard, settings: UserSettings }
+// header: x-mr-key（可选）
+// 出参: SSE stream of GenerateEvent（不含 storyboard 事件，分镜已由 /api/storyboard 给过）
 
-import { runPipeline } from "@/lib/pipeline";
+import { generateAssets } from "@/lib/pipeline";
 import {
   DEFAULT_SETTINGS,
   isProviderId,
   type GenerateEvent,
+  type Storyboard,
   type UserSettings,
 } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 800; // Vercel Pro fluid compute up to ~900s
+export const maxDuration = 800; // 跟原 /api/generate 一致
 
 interface Body {
-  topic?: string;
+  storyboard?: Storyboard;
   settings?: Partial<UserSettings>;
+}
+
+function validateStoryboard(sb: unknown): sb is Storyboard {
+  if (!sb || typeof sb !== "object") return false;
+  const x = sb as Storyboard;
+  if (typeof x.title !== "string") return false;
+  if (typeof x.global_style !== "string") return false;
+  if (typeof x.main_character !== "string") return false;
+  if (!Array.isArray(x.scenes) || x.scenes.length === 0) return false;
+  return x.scenes.every(
+    (s) =>
+      typeof s.id === "number" &&
+      typeof s.image_prompt === "string" &&
+      typeof s.video_motion === "string" &&
+      typeof s.narration === "string",
+  );
 }
 
 export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as Body;
-  const topic = (body.topic || "").trim();
-  if (!topic) {
+  if (!validateStoryboard(body.storyboard)) {
     return new Response(
-      JSON.stringify({ error: "topic 不能为空" }),
+      JSON.stringify({ error: "storyboard 不合法" }),
       { status: 400, headers: { "content-type": "application/json" } },
     );
   }
@@ -43,7 +59,6 @@ export async function POST(req: Request) {
   }
 
   const settings: UserSettings = { ...DEFAULT_SETTINGS, ...(body.settings || {}) };
-  // provider 是预设列表中的 id；非法值由 getProviderMeta 兜底到默认
   const providerId = isProviderId(settings.provider) ? settings.provider : undefined;
 
   const encoder = new TextEncoder();
@@ -55,15 +70,20 @@ export async function POST(req: Request) {
         const line = `data: ${JSON.stringify(event)}\n\n`;
         try { controller.enqueue(encoder.encode(line)); } catch {}
       }
-      // 心跳，防止中间代理切断空闲连接
       const heartbeat = setInterval(() => {
         if (closed) return;
         try { controller.enqueue(encoder.encode(`: ping\n\n`)); } catch {}
       }, 15_000);
 
       try {
-        await runPipeline(
-          { topic, apiKey, providerId, settings, signal: req.signal },
+        await generateAssets(
+          {
+            storyboard: body.storyboard!,
+            apiKey,
+            providerId,
+            settings,
+            signal: req.signal,
+          },
           send,
         );
       } catch (err) {
